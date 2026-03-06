@@ -1,0 +1,18 @@
+# Data and database files
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Environment files
+.env
+
+# Go binaries (at root only)
+/platform-starter
+/app
+
+# Go build cache
+*.test
+
+# macOS
+.DS_Store
