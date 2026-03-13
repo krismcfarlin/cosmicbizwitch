@@ -23,12 +23,13 @@ func SetupCollections(app core.App, legacyDB *sql.DB, logger *log.Logger) error 
 // createCollections registers application collections.
 // Add your collection creation functions here and call them from this loop.
 func createCollections(app core.App, logger *log.Logger) error {
-	// TODO: Add your collection creators here, for example:
-	//   {"my_collection", createMyCollection},
 	collections := []struct {
 		name   string
 		create func(core.App) error
-	}{}
+	}{
+		{"cf_contacts", createCFContactsCollection},
+		{"birth_form_submissions", createBirthFormCollection},
+	}
 
 	for _, c := range collections {
 		existing, _ := app.FindCollectionByNameOrId(c.name)
@@ -47,7 +48,10 @@ func createCollections(app core.App, logger *log.Logger) error {
 // This is needed so PocketBase's filter/sort resolver can use "created"/"updated" as sort keys.
 func ensureAutodateFields(app core.App) error {
 	// List the names of all your collections here so they get autodate fields.
-	names := []string{}
+	names := []string{
+		"cf_contacts",
+		"birth_form_submissions",
+	}
 
 	for _, name := range names {
 		col, err := app.FindCollectionByNameOrId(name)
