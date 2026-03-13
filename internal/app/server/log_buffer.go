@@ -9,50 +9,88 @@ import (
 
 const maxLogLines = 2000
 
-// LogLine holds a single captured log line with a timestamp
+// LogLine holds a single captured log line with a timestamp.
 type LogLine struct {
 	Time string
 	Text string
 }
 
-// LogBuffer is a thread-safe ring buffer that captures log output line-by-line
+// LogBuffer is a thread-safe ring buffer that captures log output line-by-line.
+// It also supports SSE subscribers that receive new lines as they arrive.
 type LogBuffer struct {
 	mu    sync.RWMutex
+	buf   bytes.Buffer
 	lines []LogLine
-	buf   bytes.Buffer // partial line accumulator
+
+	subMu       sync.Mutex
+	subscribers map[chan LogLine]struct{}
 }
 
-// NewLogBuffer creates a new LogBuffer
+// NewLogBuffer creates a new LogBuffer.
 func NewLogBuffer() *LogBuffer {
 	return &LogBuffer{
-		lines: make([]LogLine, 0, maxLogLines),
+		lines:       make([]LogLine, 0, maxLogLines),
+		subscribers: make(map[chan LogLine]struct{}),
 	}
 }
 
 // Write implements io.Writer. Lines are split on newlines and stored.
 func (b *LogBuffer) Write(p []byte) (n int, err error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-
 	b.buf.Write(p)
+
+	var newLines []LogLine
 	for {
 		data := b.buf.Bytes()
 		idx := bytes.IndexByte(data, '\n')
 		if idx < 0 {
 			break
 		}
-		line := string(data[:idx])
-		b.buf.Next(idx + 1)
-
-		b.lines = append(b.lines, LogLine{
+		line := LogLine{
 			Time: time.Now().Format("2006-01-02 15:04:05"),
-			Text: line,
-		})
+			Text: string(data[:idx]),
+		}
+		b.buf.Next(idx + 1)
+		b.lines = append(b.lines, line)
 		if len(b.lines) > maxLogLines {
 			b.lines = b.lines[len(b.lines)-maxLogLines:]
 		}
+		newLines = append(newLines, line)
 	}
+	b.mu.Unlock()
+
+	// Broadcast to SSE subscribers without holding the main lock.
+	if len(newLines) > 0 {
+		b.subMu.Lock()
+		for _, line := range newLines {
+			for ch := range b.subscribers {
+				select {
+				case ch <- line:
+				default: // drop if subscriber is slow
+				}
+			}
+		}
+		b.subMu.Unlock()
+	}
+
 	return len(p), nil
+}
+
+// Subscribe registers a new SSE subscriber and returns its channel.
+func (b *LogBuffer) Subscribe() chan LogLine {
+	ch := make(chan LogLine, 256)
+	b.subMu.Lock()
+	b.subscribers[ch] = struct{}{}
+	b.subMu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes a subscriber channel and closes it.
+func (b *LogBuffer) Unsubscribe(ch chan LogLine) {
+	b.subMu.Lock()
+	delete(b.subscribers, ch)
+	b.subMu.Unlock()
+	close(ch)
 }
 
 // Lines returns up to n most-recent lines matching filter (case-insensitive substring).

@@ -14,5 +14,8 @@ data/
 # Go build cache
 *.test
 
+# Node
+web/node_modules/
+
 # macOS
 .DS_Store
