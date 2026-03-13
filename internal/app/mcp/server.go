@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 
+	"cosmicbizwitch/internal/app/clickfunnels"
 	"cosmicbizwitch/internal/app/storage"
 	"github.com/pocketbase/pocketbase/core"
 )
@@ -27,18 +30,21 @@ func (s *MCPServer) resolveUserCollection(name string) (*core.Collection, error)
 
 // MCPServer implements the Model Context Protocol for LLM agents
 type MCPServer struct {
-	store  *storage.Store
-	logger *log.Logger
+	store    *storage.Store
+	logger   *log.Logger
+	cfClient *clickfunnels.Client
 }
 
-// NewMCPServer creates a new MCP server
-func NewMCPServer(store *storage.Store, logger *log.Logger) *MCPServer {
+// NewMCPServer creates a new MCP server. cfClient may be nil when ClickFunnels
+// is not configured; all CF tool calls will return an error in that case.
+func NewMCPServer(store *storage.Store, logger *log.Logger, cfClient *clickfunnels.Client) *MCPServer {
 	if logger == nil {
 		logger = log.Default()
 	}
 	return &MCPServer{
-		store:  store,
-		logger: logger,
+		store:    store,
+		logger:   logger,
+		cfClient: cfClient,
 	}
 }
 
@@ -186,6 +192,89 @@ func (s *MCPServer) ListTools() []Tool {
 				"required": []string{"collection", "id"},
 			},
 		},
+		{
+			Name:        "cf_list_contacts",
+			Description: "List contacts from ClickFunnels. Supports cursor pagination and tag filtering.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"after_id": map[string]interface{}{
+						"type":        "integer",
+						"description": "Cursor ID for pagination — returns contacts after this contact ID (20 per page)",
+					},
+					"tag_ids": map[string]interface{}{
+						"type":        "string",
+						"description": "Comma-separated list of tag IDs to filter by, e.g. \"1,2,3\"",
+					},
+				},
+			},
+		},
+		{
+			Name:        "cf_get_contact",
+			Description: "Get a single ClickFunnels contact by ID.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id": map[string]interface{}{
+						"type":        "integer",
+						"description": "Numeric ClickFunnels contact ID",
+					},
+				},
+				"required": []string{"id"},
+			},
+		},
+		{
+			Name:        "cf_create_contact",
+			Description: "Create a new ClickFunnels contact.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"email_address":     map[string]interface{}{"type": "string", "description": "Contact email address"},
+					"first_name":        map[string]interface{}{"type": "string", "description": "First name"},
+					"last_name":         map[string]interface{}{"type": "string", "description": "Last name"},
+					"phone_number":      map[string]interface{}{"type": "string", "description": "Phone number"},
+					"time_zone":         map[string]interface{}{"type": "string", "description": "IANA time zone identifier, e.g. \"America/New_York\""},
+					"fb_url":            map[string]interface{}{"type": "string", "description": "Facebook profile URL"},
+					"twitter_url":       map[string]interface{}{"type": "string", "description": "Twitter profile URL"},
+					"instagram_url":     map[string]interface{}{"type": "string", "description": "Instagram profile URL"},
+					"linkedin_url":      map[string]interface{}{"type": "string", "description": "LinkedIn profile URL"},
+					"website_url":       map[string]interface{}{"type": "string", "description": "Website URL"},
+					"tag_ids":           map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer"}, "description": "Array of tag IDs to assign"},
+					"custom_attributes": map[string]interface{}{"type": "object", "description": "Key/value custom attributes"},
+				},
+			},
+		},
+		{
+			Name:        "cf_sync_contacts",
+			Description: "Sync all ClickFunnels contacts into the local PocketBase cf_contacts collection. Returns a count of added and updated records.",
+			InputSchema: map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+		{
+			Name:        "cf_update_contact",
+			Description: "Update an existing ClickFunnels contact by ID.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"id":                map[string]interface{}{"type": "integer", "description": "Numeric ClickFunnels contact ID to update"},
+					"email_address":     map[string]interface{}{"type": "string", "description": "Contact email address"},
+					"first_name":        map[string]interface{}{"type": "string", "description": "First name"},
+					"last_name":         map[string]interface{}{"type": "string", "description": "Last name"},
+					"phone_number":      map[string]interface{}{"type": "string", "description": "Phone number"},
+					"time_zone":         map[string]interface{}{"type": "string", "description": "IANA time zone identifier, e.g. \"America/New_York\""},
+					"fb_url":            map[string]interface{}{"type": "string", "description": "Facebook profile URL"},
+					"twitter_url":       map[string]interface{}{"type": "string", "description": "Twitter profile URL"},
+					"instagram_url":     map[string]interface{}{"type": "string", "description": "Instagram profile URL"},
+					"linkedin_url":      map[string]interface{}{"type": "string", "description": "LinkedIn profile URL"},
+					"website_url":       map[string]interface{}{"type": "string", "description": "Website URL"},
+					"tag_ids":           map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer"}, "description": "Array of tag IDs to assign"},
+					"custom_attributes": map[string]interface{}{"type": "object", "description": "Key/value custom attributes"},
+				},
+				"required": []string{"id"},
+			},
+		},
 	}
 }
 
@@ -206,6 +295,16 @@ func (s *MCPServer) CallTool(ctx context.Context, req ToolCallRequest) (ToolCall
 		return s.pbUpdate(ctx, req.Arguments)
 	case "pb_delete":
 		return s.pbDelete(ctx, req.Arguments)
+	case "cf_sync_contacts":
+		return s.cfSyncContacts(ctx)
+	case "cf_list_contacts":
+		return s.cfListContacts(ctx, req.Arguments)
+	case "cf_get_contact":
+		return s.cfGetContact(ctx, req.Arguments)
+	case "cf_create_contact":
+		return s.cfCreateContact(ctx, req.Arguments)
+	case "cf_update_contact":
+		return s.cfUpdateContact(ctx, req.Arguments)
 	default:
 		return ToolCallResponse{
 			Content: []ContentBlock{{
@@ -386,6 +485,149 @@ func (s *MCPServer) pbDelete(ctx context.Context, args map[string]interface{}) (
 	}
 
 	return textResponse(fmt.Sprintf("Deleted record %s from %s", id, collection)), nil
+}
+
+// cfSyncContacts fetches all ClickFunnels contacts and upserts them into cf_contacts.
+func (s *MCPServer) cfSyncContacts(ctx context.Context) (ToolCallResponse, error) {
+	if s.cfClient == nil {
+		return errorResponse("ClickFunnels not configured"), nil
+	}
+
+	added, updated, err := s.store.SyncCFContacts(ctx, s.cfClient)
+	if err != nil {
+		return errorResponse(fmt.Sprintf("sync contacts failed: %v", err)), err
+	}
+
+	total := added + updated
+	return textResponse(fmt.Sprintf("Synced %d contacts: %d added, %d updated", total, added, updated)), nil
+}
+
+// cfListContacts lists contacts from ClickFunnels with optional cursor and tag filters.
+func (s *MCPServer) cfListContacts(ctx context.Context, args map[string]interface{}) (ToolCallResponse, error) {
+	if s.cfClient == nil {
+		return errorResponse("ClickFunnels not configured"), nil
+	}
+
+	afterID := 0
+	if v, ok := args["after_id"].(float64); ok {
+		afterID = int(v)
+	}
+
+	var tagIDs []int
+	if v, ok := args["tag_ids"].(string); ok && v != "" {
+		for _, part := range strings.Split(v, ",") {
+			part = strings.TrimSpace(part)
+			if id, err := strconv.Atoi(part); err == nil {
+				tagIDs = append(tagIDs, id)
+			}
+		}
+	}
+
+	contacts, err := s.cfClient.ListContacts(ctx, afterID, tagIDs)
+	if err != nil {
+		return errorResponse(fmt.Sprintf("list contacts failed: %v", err)), err
+	}
+
+	out, _ := json.MarshalIndent(contacts, "", "  ")
+	return textResponse(fmt.Sprintf("Found %d contact(s):\n\n%s", len(contacts), string(out))), nil
+}
+
+// cfGetContact retrieves a single ClickFunnels contact by numeric ID.
+func (s *MCPServer) cfGetContact(ctx context.Context, args map[string]interface{}) (ToolCallResponse, error) {
+	if s.cfClient == nil {
+		return errorResponse("ClickFunnels not configured"), nil
+	}
+
+	idVal, ok := args["id"].(float64)
+	if !ok || idVal <= 0 {
+		return errorResponse("id is required and must be a positive integer"), nil
+	}
+
+	contact, err := s.cfClient.GetContact(ctx, int(idVal))
+	if err != nil {
+		return errorResponse(fmt.Sprintf("get contact failed: %v", err)), err
+	}
+
+	out, _ := json.MarshalIndent(contact, "", "  ")
+	return textResponse(string(out)), nil
+}
+
+// cfContactParamsFromArgs extracts ContactParams from the MCP arguments map.
+func cfContactParamsFromArgs(args map[string]interface{}) clickfunnels.ContactParams {
+	strPtr := func(key string) *string {
+		if v, ok := args[key].(string); ok && v != "" {
+			return &v
+		}
+		return nil
+	}
+
+	var params clickfunnels.ContactParams
+	params.EmailAddress = strPtr("email_address")
+	params.FirstName = strPtr("first_name")
+	params.LastName = strPtr("last_name")
+	params.PhoneNumber = strPtr("phone_number")
+	params.TimeZone = strPtr("time_zone")
+	params.FbURL = strPtr("fb_url")
+	params.TwitterURL = strPtr("twitter_url")
+	params.InstagramURL = strPtr("instagram_url")
+	params.LinkedinURL = strPtr("linkedin_url")
+	params.WebsiteURL = strPtr("website_url")
+
+	if raw, ok := args["tag_ids"].([]interface{}); ok {
+		for _, v := range raw {
+			if f, ok := v.(float64); ok {
+				params.TagIDs = append(params.TagIDs, int(f))
+			}
+		}
+	}
+
+	if raw, ok := args["custom_attributes"].(map[string]interface{}); ok {
+		params.CustomAttributes = make(map[string]string, len(raw))
+		for k, v := range raw {
+			if s, ok := v.(string); ok {
+				params.CustomAttributes[k] = s
+			}
+		}
+	}
+
+	return params
+}
+
+// cfCreateContact creates a new ClickFunnels contact.
+func (s *MCPServer) cfCreateContact(ctx context.Context, args map[string]interface{}) (ToolCallResponse, error) {
+	if s.cfClient == nil {
+		return errorResponse("ClickFunnels not configured"), nil
+	}
+
+	params := cfContactParamsFromArgs(args)
+	contact, err := s.cfClient.CreateContact(ctx, params)
+	if err != nil {
+		return errorResponse(fmt.Sprintf("create contact failed: %v", err)), err
+	}
+
+	out, _ := json.MarshalIndent(contact, "", "  ")
+	return textResponse(fmt.Sprintf("Created contact:\n\n%s", string(out))), nil
+}
+
+// cfUpdateContact updates an existing ClickFunnels contact.
+func (s *MCPServer) cfUpdateContact(ctx context.Context, args map[string]interface{}) (ToolCallResponse, error) {
+	if s.cfClient == nil {
+		return errorResponse("ClickFunnels not configured"), nil
+	}
+
+	idVal, ok := args["id"].(float64)
+	if !ok || idVal <= 0 {
+		return errorResponse("id is required and must be a positive integer"), nil
+	}
+
+	params := cfContactParamsFromArgs(args)
+	contact, err := s.cfClient.UpdateContact(ctx, int(idVal), params)
+	if err != nil {
+		return errorResponse(fmt.Sprintf("update contact failed: %v", err)), err
+	}
+
+	out, _ := json.MarshalIndent(contact, "", "  ")
+	return textResponse(fmt.Sprintf("Updated contact:\n\n%s", string(out))), nil
 }
 
 // recordToMap serializes a PocketBase record to a flat map for JSON output.

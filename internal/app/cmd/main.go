@@ -7,7 +7,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 
+	"cosmicbizwitch/internal/app/clickfunnels"
 	"cosmicbizwitch/internal/app/server"
 	"cosmicbizwitch/internal/app/storage"
 	"cosmicbizwitch/internal/app/triggers"
@@ -30,6 +32,23 @@ func main() {
 
 	dbPath := getEnv("DB_PATH", "data/coaching.db")
 	port := getEnvInt("PORT", 8083)
+
+	// ClickFunnels client — optional; only created when CF_API_KEY is set.
+	var cfClient *clickfunnels.Client
+	if cfAPIKey := os.Getenv("CF_API_KEY"); cfAPIKey != "" {
+		cfWorkspaceID := 0
+		if raw := os.Getenv("CF_WORKSPACE_ID"); raw != "" {
+			if id, err := strconv.Atoi(raw); err == nil {
+				cfWorkspaceID = id
+			}
+		}
+		cfClient = clickfunnels.NewClient(clickfunnels.Config{
+			APIKey:      cfAPIKey,
+			Subdomain:   os.Getenv("CF_SUBDOMAIN"),
+			WorkspaceID: cfWorkspaceID,
+		})
+		logger.Println("ClickFunnels client configured")
+	}
 
 	// Resolve paths
 	absDBPath, err := filepath.Abs(dbPath)
@@ -105,6 +124,7 @@ func main() {
 				LogBuffer: logBuf,
 				Engine:    eng,
 				Triggers:  triggerMgr,
+				CFClient:  cfClient,
 			})
 
 			// Mount our HTTP handler on PocketBase's router as catch-all.

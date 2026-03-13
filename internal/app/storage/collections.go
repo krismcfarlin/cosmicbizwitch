@@ -27,6 +27,8 @@ func createCollections(app core.App, logger *log.Logger) error {
 		name   string
 		create func(core.App) error
 	}{
+		{"cf_contacts", createCFContactsCollection},
+		{"birth_form_submissions", createBirthFormCollection},
 		{"contacts", createContacts},
 		{"birth_chart_records", createBirthChartRecords},
 		{"new_moon_intentions", createNewMoonIntentions},
@@ -52,6 +54,8 @@ func createCollections(app core.App, logger *log.Logger) error {
 // This is needed so PocketBase's filter/sort resolver can use "created"/"updated" as sort keys.
 func ensureAutodateFields(app core.App) error {
 	names := []string{
+		"cf_contacts",
+		"birth_form_submissions",
 		"contacts",
 		"birth_chart_records",
 		"new_moon_intentions",

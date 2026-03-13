@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"cosmicbizwitch/internal/app/clickfunnels"
 	"cosmicbizwitch/internal/app/mcp"
 	"cosmicbizwitch/internal/app/storage"
 	"cosmicbizwitch/internal/app/triggers"
@@ -31,6 +32,7 @@ type Config struct {
 	Port      int
 	Logger    *log.Logger
 	LogBuffer *LogBuffer
+	CFClient  *clickfunnels.Client
 	Engine    *workflow.Engine
 	Triggers  *triggers.Manager
 }
@@ -43,7 +45,7 @@ func New(store *storage.Store, cfg Config) *Server {
 
 	s := &Server{
 		store:     store,
-		mcpServer: mcp.NewMCPServer(store, cfg.Logger),
+		mcpServer: mcp.NewMCPServer(store, cfg.Logger, cfg.CFClient),
 		engine:    cfg.Engine,
 		triggers:  cfg.Triggers,
 		logger:    cfg.Logger,
@@ -74,6 +76,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("POST /login", s.handleLoginSubmit)
 	mux.HandleFunc("GET /logout", s.handleLogout)
+
+	// Birth form submission (no auth required)
+	mux.HandleFunc("POST /birthform", s.handleBirthForm)
 
 	// MCP endpoints (require superuser auth token)
 	mux.HandleFunc("/mcp/tools", s.requireMCPAuth(s.handleMCPListTools))
