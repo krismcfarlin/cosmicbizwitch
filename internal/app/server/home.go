@@ -23,6 +23,20 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 </header>
 <div class="container">
     <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; padding-top: 20px;">
+        <a href="/workflows" style="text-decoration: none;">
+            <div class="stat-card" style="cursor: pointer; transition: box-shadow 0.2s;" onmouseover="this.style.boxShadow='0 4px 16px rgba(102,126,234,0.3)'" onmouseout="this.style.boxShadow=''">
+                <h3>Workflows</h3>
+                <div class="value" style="font-size: 20px; margin-top: 12px; color: #667eea;">/workflows</div>
+                <p style="color: #888; font-size: 13px; margin-top: 8px;">Run and monitor workflow instances</p>
+            </div>
+        </a>
+        <a href="/triggers" style="text-decoration: none;">
+            <div class="stat-card" style="cursor: pointer; transition: box-shadow 0.2s;" onmouseover="this.style.boxShadow='0 4px 16px rgba(102,126,234,0.3)'" onmouseout="this.style.boxShadow=''">
+                <h3>Triggers</h3>
+                <div class="value" style="font-size: 20px; margin-top: 12px; color: #e67e22;">/triggers</div>
+                <p style="color: #888; font-size: 13px; margin-top: 8px;">Manage webhook, record hook, and cron triggers</p>
+            </div>
+        </a>
         <a href="/logs" style="text-decoration: none;">
             <div class="stat-card" style="cursor: pointer; transition: box-shadow 0.2s;" onmouseover="this.style.boxShadow='0 4px 16px rgba(102,126,234,0.3)'" onmouseout="this.style.boxShadow=''">
                 <h3>Log Viewer</h3>

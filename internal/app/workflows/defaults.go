@@ -12,20 +12,21 @@ import (
 	"strings"
 	"time"
 
+	"cosmicbizwitch/internal/app/clickfunnels"
 	"cosmicbizwitch/pkg/workflow"
 
 	"github.com/pocketbase/pocketbase/core"
 )
 
 // RegisterDefaults wires up built-in demo activities and graphs into the engine.
-func RegisterDefaults(eng *workflow.Engine, app core.App) error {
-	registerActivities(eng, app)
-	return registerGraphs(eng)
+func RegisterDefaults(eng *workflow.Engine, app core.App, cfClient *clickfunnels.Client) error {
+	registerActivities(eng, app, cfClient)
+	return registerGraphs(eng, cfClient)
 }
 
 // ── Activities ────────────────────────────────────────────────────────────────
 
-func registerActivities(eng *workflow.Engine, app core.App) {
+func registerActivities(eng *workflow.Engine, app core.App, cfClient *clickfunnels.Client) {
 	// echo: returns its input unchanged. Useful as a pass-through step.
 	eng.RegisterActivityWithMeta("echo",
 		func(_ context.Context, input map[string]any) (map[string]any, error) {
@@ -354,11 +355,150 @@ func registerActivities(eng *workflow.Engine, app core.App) {
 			OutputFields: []workflow.FieldMeta{{Name: "*", Type: "any", Description: "Merged map of all branch outputs"}},
 		},
 	)
+
+	// cf_upsert_contact: upserts a ClickFunnels contact into the cf_contacts PocketBase collection.
+	// Expects the output fields from cf_get_contact in the workflow context.
+	eng.RegisterActivityWithMeta("cf_upsert_contact",
+		func(_ context.Context, input map[string]any) (map[string]any, error) {
+			cfID := int(toFloat64OrZero(input["cf_id"]))
+			if cfID == 0 {
+				return nil, fmt.Errorf("cf_upsert_contact: cf_id is required")
+			}
+
+			// Find existing record by cf_id.
+			existing, _ := app.FindRecordsByFilter(
+				"cf_contacts",
+				fmt.Sprintf("cf_id = %d", cfID),
+				"", 1, 0,
+			)
+
+			var rec *core.Record
+			if len(existing) > 0 {
+				rec = existing[0]
+			} else {
+				col, err := app.FindCollectionByNameOrId("cf_contacts")
+				if err != nil {
+					return nil, fmt.Errorf("cf_upsert_contact: find collection: %w", err)
+				}
+				rec = core.NewRecord(col)
+			}
+
+			rec.Set("cf_id", cfID)
+			rec.Set("cf_public_id", input["cf_public_id"])
+			rec.Set("email_address", input["email_address"])
+			rec.Set("first_name", input["first_name"])
+			rec.Set("last_name", input["last_name"])
+			rec.Set("phone_number", input["phone_number"])
+			rec.Set("is_active", input["is_active"])
+
+			if tags := input["tags"]; tags != nil {
+				if b, err := json.Marshal(tags); err == nil {
+					rec.Set("tags", string(b))
+				}
+			}
+			if attrs := input["custom_attributes"]; attrs != nil {
+				if b, err := json.Marshal(attrs); err == nil {
+					rec.Set("custom_attributes", string(b))
+				}
+			}
+
+			if err := app.SaveNoValidate(rec); err != nil {
+				return nil, fmt.Errorf("cf_upsert_contact: save: %w", err)
+			}
+
+			out := make(map[string]any, len(input))
+			for k, v := range input {
+				out[k] = v
+			}
+			out["pb_record_id"] = rec.Id
+			return out, nil
+		},
+		workflow.ActivityMeta{
+			Description: "Upserts a ClickFunnels contact into the cf_contacts PocketBase collection",
+			InputFields: []workflow.FieldMeta{
+				{Name: "cf_id", Type: "number", Description: "ClickFunnels contact ID", Required: true},
+				{Name: "cf_public_id", Type: "string"},
+				{Name: "email_address", Type: "string"},
+				{Name: "first_name", Type: "string"},
+				{Name: "last_name", Type: "string"},
+				{Name: "phone_number", Type: "string"},
+				{Name: "is_active", Type: "bool"},
+				{Name: "tags", Type: "any"},
+				{Name: "custom_attributes", Type: "object"},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "pb_record_id", Type: "string", Description: "PocketBase record ID of the upserted contact"},
+				{Name: "*", Type: "any", Description: "All input fields passed through"},
+			},
+		},
+	)
+
+	// cf_get_contact: fetches a ClickFunnels contact by numeric ID.
+	// If cfClient is nil (CF_API_KEY not configured), the activity returns an error.
+	eng.RegisterActivityWithMeta("cf_get_contact",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			if cfClient == nil {
+				return nil, fmt.Errorf("cf_get_contact: ClickFunnels client not configured (CF_API_KEY missing)")
+			}
+			contactID := int(toFloat64OrZero(input["contact_id"]))
+			if contactID == 0 {
+				return nil, fmt.Errorf("cf_get_contact: contact_id is required and must be non-zero")
+			}
+			contact, err := cfClient.GetContact(ctx, contactID)
+			if err != nil {
+				return nil, fmt.Errorf("cf_get_contact: %w", err)
+			}
+			email := ""
+			if contact.EmailAddress != nil {
+				email = *contact.EmailAddress
+			}
+			firstName := ""
+			if contact.FirstName != nil {
+				firstName = *contact.FirstName
+			}
+			lastName := ""
+			if contact.LastName != nil {
+				lastName = *contact.LastName
+			}
+			phoneNumber := ""
+			if contact.PhoneNumber != nil {
+				phoneNumber = *contact.PhoneNumber
+			}
+			return map[string]any{
+				"cf_id":             contact.ID,
+				"cf_public_id":      contact.PublicID,
+				"email_address":     email,
+				"first_name":        firstName,
+				"last_name":         lastName,
+				"phone_number":      phoneNumber,
+				"is_active":         contact.IsActive,
+				"tags":              contact.Tags,
+				"custom_attributes": contact.CustomAttributes,
+			}, nil
+		},
+		workflow.ActivityMeta{
+			Description: "Fetches a ClickFunnels contact by numeric ID from the workflow context",
+			InputFields: []workflow.FieldMeta{
+				{Name: "contact_id", Type: "number", Description: "Numeric ClickFunnels contact ID", Required: true},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "cf_id", Type: "number", Description: "ClickFunnels contact ID"},
+				{Name: "cf_public_id", Type: "string", Description: "ClickFunnels public ID"},
+				{Name: "email_address", Type: "string"},
+				{Name: "first_name", Type: "string"},
+				{Name: "last_name", Type: "string"},
+				{Name: "phone_number", Type: "string"},
+				{Name: "is_active", Type: "bool"},
+				{Name: "tags", Type: "any", Description: "Array of tag objects"},
+				{Name: "custom_attributes", Type: "object"},
+			},
+		},
+	)
 }
 
 // ── Graphs ────────────────────────────────────────────────────────────────────
 
-func registerGraphs(eng *workflow.Engine) error {
+func registerGraphs(eng *workflow.Engine, cfClient *clickfunnels.Client) error {
 	// demo_conditional: demonstrates conditional branching based on "value".
 	//
 	//  start (echo)
@@ -492,6 +632,30 @@ func registerGraphs(eng *workflow.Engine) error {
 		},
 	}); err != nil {
 		return fmt.Errorf("demo_human: %w", err)
+	}
+
+	// birth_process: triggered by the birth form webhook.
+	// 1. get_contact  — fetch full contact from ClickFunnels by contact_id
+	// 2. save_contact — upsert the contact into the cf_contacts PocketBase collection
+	if err := eng.RegisterGraph(&workflow.ActivityGraph{
+		Name:      "birth_process",
+		StartNode: "get_contact",
+		Nodes: map[string]*workflow.Node{
+			"get_contact": {
+				ID:           "get_contact",
+				ActivityName: "cf_get_contact",
+				MaxRetries:   2,
+				Transitions:  []workflow.Transition{{NextNode: "save_contact"}},
+			},
+			"save_contact": {
+				ID:           "save_contact",
+				ActivityName: "cf_upsert_contact",
+				MaxRetries:   2,
+				Transitions:  []workflow.Transition{{NextNode: ""}},
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("birth_process: %w", err)
 	}
 
 	return nil

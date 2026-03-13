@@ -100,7 +100,7 @@ func main() {
 			eng := workflow.NewEngine(pbstore.New(e.App), workflow.EngineConfig{Logger: logger})
 
 			// Register default demo activities and graphs
-			if err := appworkflows.RegisterDefaults(eng, e.App); err != nil {
+			if err := appworkflows.RegisterDefaults(eng, e.App, cfClient); err != nil {
 				return fmt.Errorf("register default workflows: %w", err)
 			}
 

@@ -29,7 +29,15 @@ func (s *Server) handleBirthForm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: trigger workflow with payload.SubjectID
+	// Fire birth_process workflow with the contact ID.
+	if s.engine != nil {
+		if _, wfErr := s.engine.CreateWorkflow(r.Context(), "birth_process", "birth_process", map[string]any{
+			"contact_id": float64(payload.SubjectID),
+			"event_id":   payload.EventID,
+		}, nil); wfErr != nil {
+			s.logger.Printf("birthform: start workflow failed: %v", wfErr)
+		}
+	}
 
 	s.respondJSON(w, http.StatusOK, map[string]string{"status": "received"})
 }
