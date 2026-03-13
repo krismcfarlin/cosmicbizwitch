@@ -292,6 +292,27 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
+// requireMCPAuth validates a PocketBase superuser Bearer token on MCP endpoints.
+// The token must be obtained via POST /api/collections/_superusers/auth-with-password.
+func (s *Server) requireMCPAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if len(authHeader) < 8 || authHeader[:7] != "Bearer " {
+			http.Error(w, `{"error":"missing or invalid Authorization header"}`, http.StatusUnauthorized)
+			return
+		}
+		token := authHeader[7:]
+
+		record, err := s.store.App().FindAuthRecordByToken(token, "auth")
+		if err != nil || record.Collection().Name != "_superusers" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+
+		next(w, r)
+	}
+}
+
 // requireAuth is middleware that redirects unauthenticated requests to /login.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

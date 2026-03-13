@@ -11,14 +11,19 @@ import (
 	"cosmicbizwitch/internal/app/clickfunnels"
 	"cosmicbizwitch/internal/app/mcp"
 	"cosmicbizwitch/internal/app/storage"
+	"cosmicbizwitch/internal/app/triggers"
+	"cosmicbizwitch/internal/ui"
+	"cosmicbizwitch/pkg/workflow"
 )
 
 // Server represents the HTTP server
 type Server struct {
-	store     *storage.Store
-	mcpServer *mcp.MCPServer
-	logger    *log.Logger
-	logBuffer *LogBuffer
+	store      *storage.Store
+	mcpServer  *mcp.MCPServer
+	engine     *workflow.Engine
+	triggers   *triggers.Manager
+	logger     *log.Logger
+	logBuffer  *LogBuffer
 	httpServer *http.Server
 }
 
@@ -28,6 +33,8 @@ type Config struct {
 	Logger    *log.Logger
 	LogBuffer *LogBuffer
 	CFClient  *clickfunnels.Client
+	Engine    *workflow.Engine
+	Triggers  *triggers.Manager
 }
 
 // New creates a new server instance
@@ -39,6 +46,8 @@ func New(store *storage.Store, cfg Config) *Server {
 	s := &Server{
 		store:     store,
 		mcpServer: mcp.NewMCPServer(store, cfg.Logger, cfg.CFClient),
+		engine:    cfg.Engine,
+		triggers:  cfg.Triggers,
 		logger:    cfg.Logger,
 		logBuffer: cfg.LogBuffer,
 	}
@@ -71,13 +80,49 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Birth form submission (no auth required)
 	mux.HandleFunc("POST /birthform", s.handleBirthForm)
 
-	// MCP endpoints
-	mux.HandleFunc("/mcp/tools", s.handleMCPListTools)
-	mux.HandleFunc("/mcp/call", s.handleMCPCallTool)
+	// MCP endpoints (require superuser auth token)
+	mux.HandleFunc("/mcp/tools", s.requireMCPAuth(s.handleMCPListTools))
+	mux.HandleFunc("/mcp/call", s.requireMCPAuth(s.handleMCPCallTool))
+
+	// Static assets for React SPA (no auth — assets are fingerprinted)
+	mux.Handle("/assets/", ui.Handler())
 
 	// Logs viewer (auth required)
 	mux.HandleFunc("GET /logs", s.requireAuth(s.handleLogsPage))
-	mux.HandleFunc("GET /logs/data", s.requireAuth(s.handleLogsAPI))
+	mux.HandleFunc("GET /logs/data", s.requireAuth(s.handleLogsData))
+	mux.HandleFunc("GET /logs/stream", s.requireAuth(s.handleLogsStream))
+
+	// Workflow SPA pages (auth required)
+	mux.HandleFunc("GET /workflows/builder", s.requireAuth(s.handleLogsPage))
+	mux.HandleFunc("GET /workflows", s.requireAuth(s.handleLogsPage))
+	mux.HandleFunc("GET /workflows/{path...}", s.requireAuth(s.handleLogsPage))
+
+	// Workflow API (auth required)
+	mux.HandleFunc("GET /api/workflows/stream", s.requireAuth(s.handleWorkflowStream))
+	mux.HandleFunc("GET /api/workflows/graphs", s.requireAuth(s.handleWorkflowGraphs))
+	mux.HandleFunc("GET /api/workflows/activities", s.requireAuth(s.handleWorkflowActivitiesList))
+	mux.HandleFunc("POST /api/workflows/graphs", s.requireAuth(s.handleGraphSave))
+	mux.HandleFunc("GET /api/workflows/{id}", s.requireAuth(s.handleWorkflowGet))
+	mux.HandleFunc("GET /api/workflows/{id}/activities", s.requireAuth(s.handleWorkflowActivities))
+	mux.HandleFunc("GET /api/workflows", s.requireAuth(s.handleWorkflowList))
+	mux.HandleFunc("POST /api/workflows", s.requireAuth(s.handleWorkflowCreate))
+	mux.HandleFunc("POST /api/workflows/{id}/cancel", s.requireAuth(s.handleWorkflowCancel))
+	mux.HandleFunc("POST /api/workflows/{id}/restart", s.requireAuth(s.handleWorkflowRestart))
+	mux.HandleFunc("POST /api/workflows/{id}/trigger", s.requireAuth(s.handleWorkflowTrigger))
+
+	// Webhook (no auth — public endpoint)
+	mux.HandleFunc("POST /webhooks/{token}", s.handleWebhook)
+
+	// Trigger CRUD (auth required)
+	mux.HandleFunc("GET /api/triggers", s.requireAuth(s.handleTriggerList))
+	mux.HandleFunc("POST /api/triggers", s.requireAuth(s.handleTriggerCreate))
+	mux.HandleFunc("GET /api/triggers/{id}", s.requireAuth(s.handleTriggerGet))
+	mux.HandleFunc("PUT /api/triggers/{id}", s.requireAuth(s.handleTriggerUpdate))
+	mux.HandleFunc("DELETE /api/triggers/{id}", s.requireAuth(s.handleTriggerDelete))
+
+	// Trigger pages (SPA)
+	mux.HandleFunc("GET /triggers", s.requireAuth(s.handleLogsPage))
+	mux.HandleFunc("GET /triggers/{path...}", s.requireAuth(s.handleLogsPage))
 
 	// Home (catch-all, auth required)
 	mux.HandleFunc("/", s.handleHome)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -11,6 +12,10 @@ import (
 	"cosmicbizwitch/internal/app/clickfunnels"
 	"cosmicbizwitch/internal/app/server"
 	"cosmicbizwitch/internal/app/storage"
+	"cosmicbizwitch/internal/app/triggers"
+	appworkflows "cosmicbizwitch/internal/app/workflows"
+	"cosmicbizwitch/pkg/workflow"
+	"cosmicbizwitch/pkg/workflow/pbstore"
 
 	"github.com/joho/godotenv"
 	"github.com/pocketbase/pocketbase"
@@ -70,11 +75,46 @@ func main() {
 	// then wire up routes.
 	pb.OnServe().Bind(&hook.Handler[*core.ServeEvent]{
 		Func: func(e *core.ServeEvent) error {
+			// Ensure dev superuser exists on every startup.
+			if _, err := e.App.FindAuthRecordByEmail("_superusers", "krismcfarlin@gmail.com"); err != nil {
+				if col, cerr := e.App.FindCollectionByNameOrId("_superusers"); cerr == nil {
+					su := core.NewRecord(col)
+					su.SetEmail("krismcfarlin@gmail.com")
+					su.SetPassword("super1234bad")
+					_ = e.App.Save(su)
+				}
+			}
+
 			logger.Println("Initializing storage...")
 			store, err := storage.New(pb, legacyDB, storage.Config{Logger: logger})
 			if err != nil {
 				return fmt.Errorf("failed to initialize storage: %w", err)
 			}
+
+			// Workflow collections
+			if err := pbstore.CreateCollections(e.App); err != nil {
+				return fmt.Errorf("workflow collections: %w", err)
+			}
+
+			// Workflow engine
+			eng := workflow.NewEngine(pbstore.New(e.App), workflow.EngineConfig{Logger: logger})
+
+			// Register default demo activities and graphs
+			if err := appworkflows.RegisterDefaults(eng, e.App); err != nil {
+				return fmt.Errorf("register default workflows: %w", err)
+			}
+
+			// PocketBase hook example — trigger a workflow when a contact is created:
+			// e.App.OnRecordAfterCreateSuccess("contacts").BindFunc(func(ev *core.RecordEvent) error {
+			//     go eng.CreateWorkflow(context.Background(), "onboard_contact", "onboard_contact",
+			//         map[string]any{"contact_id": ev.Record.Id, "email": ev.Record.GetString("email")}, nil)
+			//     return ev.Next()
+			// })
+			eng.Start(context.Background())
+
+			// Trigger manager
+			triggerMgr := triggers.New(e.App, eng, logger)
+			triggerMgr.Start(context.Background())
 
 			// HTTP server
 			logger.Println("Initializing server...")
@@ -82,6 +122,8 @@ func main() {
 				Port:      port,
 				Logger:    logger,
 				LogBuffer: logBuf,
+				Engine:    eng,
+				Triggers:  triggerMgr,
 				CFClient:  cfClient,
 			})
 
