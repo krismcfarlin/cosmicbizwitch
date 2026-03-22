@@ -6,6 +6,7 @@ import WorkflowList from './WorkflowList'
 import WorkflowDetail from './WorkflowDetail'
 import WorkflowBuilder from './WorkflowBuilder'
 import Triggers from './Triggers'
+import Settings from './Settings'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -17,6 +18,7 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/workflows" element={<WorkflowList />} />
         <Route path="/triggers" element={<Triggers />} />
         <Route path="/triggers/*" element={<Triggers />} />
+        <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/workflows" replace />} />
       </Routes>
     </BrowserRouter>

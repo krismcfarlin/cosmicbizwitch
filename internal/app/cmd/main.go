@@ -7,9 +7,9 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 
-	"cosmicbizwitch/internal/app/clickfunnels"
+	"strings"
+
 	"cosmicbizwitch/internal/app/server"
 	"cosmicbizwitch/internal/app/storage"
 	"cosmicbizwitch/internal/app/triggers"
@@ -32,23 +32,6 @@ func main() {
 
 	dbPath := getEnv("DB_PATH", "data/coaching.db")
 	port := getEnvInt("PORT", 8083)
-
-	// ClickFunnels client — optional; only created when CF_API_KEY is set.
-	var cfClient *clickfunnels.Client
-	if cfAPIKey := os.Getenv("CF_API_KEY"); cfAPIKey != "" {
-		cfWorkspaceID := 0
-		if raw := os.Getenv("CF_WORKSPACE_ID"); raw != "" {
-			if id, err := strconv.Atoi(raw); err == nil {
-				cfWorkspaceID = id
-			}
-		}
-		cfClient = clickfunnels.NewClient(clickfunnels.Config{
-			APIKey:      cfAPIKey,
-			Subdomain:   os.Getenv("CF_SUBDOMAIN"),
-			WorkspaceID: cfWorkspaceID,
-		})
-		logger.Println("ClickFunnels client configured")
-	}
 
 	// Resolve paths
 	absDBPath, err := filepath.Abs(dbPath)
@@ -96,11 +79,17 @@ func main() {
 				return fmt.Errorf("workflow collections: %w", err)
 			}
 
+			// Settings manager — reads CF credentials from app_settings collection.
+			settingsMgr := storage.NewSettingsManager(e.App)
+			if err := settingsMgr.Reload(logger); err != nil {
+				logger.Printf("settings reload warning: %v", err)
+			}
+
 			// Workflow engine
 			eng := workflow.NewEngine(pbstore.New(e.App), workflow.EngineConfig{Logger: logger})
 
 			// Register default demo activities and graphs
-			if err := appworkflows.RegisterDefaults(eng, e.App); err != nil {
+			if err := appworkflows.RegisterDefaults(eng, e.App, settingsMgr.CFClient); err != nil {
 				return fmt.Errorf("register default workflows: %w", err)
 			}
 
@@ -124,7 +113,7 @@ func main() {
 				LogBuffer: logBuf,
 				Engine:    eng,
 				Triggers:  triggerMgr,
-				CFClient:  cfClient,
+				Settings:  settingsMgr,
 			})
 
 			// Mount our HTTP handler on PocketBase's router as catch-all.
@@ -147,9 +136,21 @@ func main() {
 		Priority: 999,
 	})
 
-	// Configure PocketBase to serve on our port
-	if len(os.Args) == 1 {
-		os.Args = append(os.Args, "serve", fmt.Sprintf("--http=0.0.0.0:%d", port))
+	// Ensure PocketBase serves on our port.
+	// If args are just ["serve"] (no --http flag), inject it.
+	hasHTTP := false
+	for _, a := range os.Args {
+		if strings.HasPrefix(a, "--http") {
+			hasHTTP = true
+			break
+		}
+	}
+	if !hasHTTP {
+		// Add serve if missing, then inject --http
+		if len(os.Args) == 1 {
+			os.Args = append(os.Args, "serve")
+		}
+		os.Args = append(os.Args, fmt.Sprintf("--http=0.0.0.0:%d", port))
 	}
 
 	logger.Println("Starting PocketBase...")

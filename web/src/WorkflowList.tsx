@@ -37,6 +37,7 @@ export default function WorkflowList() {
   const [newName, setNewName] = useState('')
   const [newGraph, setNewGraph] = useState('')
   const [newContext, setNewContext] = useState('{}')
+  const [graphsExpanded, setGraphsExpanded] = useState(true)
   const navigate = useNavigate()
 
   const fetchWorkflows = useCallback(async () => {
@@ -48,6 +49,16 @@ export default function WorkflowList() {
     }
     setLoading(false)
   }, [statusFilter])
+
+  const fetchGraphs = useCallback(async () => {
+    const res = await fetch('/api/workflows/graphs')
+    if (res.ok) {
+      const data = await res.json()
+      setGraphs(data.names ?? [])
+    }
+  }, [])
+
+  useEffect(() => { fetchGraphs() }, [fetchGraphs])
 
   useEffect(() => {
     fetchWorkflows()
@@ -74,13 +85,7 @@ export default function WorkflowList() {
   }, [])
 
   const openCreateModal = async () => {
-    const res = await fetch('/api/workflows/graphs')
-    if (res.ok) {
-      const data = await res.json()
-      const list: string[] = data.names ?? []
-      setGraphs(list)
-      setNewGraph(list[0] ?? '')
-    }
+    setNewGraph(graphs[0] ?? '')
     setNewName('')
     setNewContext('{}')
     setCreateModal(true)
@@ -128,6 +133,30 @@ export default function WorkflowList() {
       </header>
 
       <div style={{ padding: '20px 24px' }}>
+        {/* Graphs panel */}
+        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', marginBottom: '16px', overflow: 'hidden' }}>
+          <div onClick={() => setGraphsExpanded(e => !e)}
+            style={{ padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', borderBottom: graphsExpanded ? '1px solid #e0e6ed' : 'none' }}>
+            <span style={{ fontWeight: 600, fontSize: '13px', color: '#444', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Graphs ({graphs.length})</span>
+            <span style={{ color: '#999', fontSize: '12px' }}>{graphsExpanded ? '▲ collapse' : '▼ expand'}</span>
+          </div>
+          {graphsExpanded && (
+            graphs.length === 0
+              ? <div style={{ padding: '16px', color: '#999', fontSize: '13px' }}>No graphs registered.</div>
+              : <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '12px 16px' }}>
+                  {graphs.map(g => (
+                    <div key={g} style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#f5f7fa', border: '1px solid #e0e6ed', borderRadius: '6px', padding: '6px 12px' }}>
+                      <span style={{ fontFamily: 'monospace', fontSize: '13px', color: '#2c3e50' }}>{g}</span>
+                      <button onClick={() => navigate(`/workflows/builder?graph=${encodeURIComponent(g)}`)}
+                        style={{ background: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px', fontWeight: 500 }}>Edit</button>
+                      <button onClick={() => { setNewGraph(g); setNewName(''); setNewContext('{}'); setCreateModal(true) }}
+                        style={{ background: '#27ae60', color: 'white', border: 'none', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px', fontWeight: 500 }}>▶ Run</button>
+                    </div>
+                  ))}
+                </div>
+          )}
+        </div>
+
         {/* Status filter tabs */}
         <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap' }}>
           {STATUS_TABS.map(s => (

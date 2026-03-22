@@ -16,7 +16,7 @@ func (s *Store) SyncCFContacts(ctx context.Context, client *clickfunnels.Client)
 	afterID := 0
 
 	for {
-		contacts, fetchErr := client.ListContacts(ctx, afterID, nil)
+		contacts, fetchErr := client.ListContacts(ctx, afterID, 100, nil)
 		if fetchErr != nil {
 			return added, updated, fmt.Errorf("list contacts (afterID=%d): %w", afterID, fetchErr)
 		}

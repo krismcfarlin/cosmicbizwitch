@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -16,7 +17,7 @@ import (
 type Config struct {
 	APIKey      string
 	Subdomain   string
-	WorkspaceID int
+	WorkspaceID string
 }
 
 // Client is an authenticated HTTP client for the ClickFunnels 2.0 API.
@@ -102,13 +103,17 @@ type ContactParams struct {
 
 // ListContacts fetches a page of contacts from the workspace.
 // afterID is the cursor ID for pagination (0 means first page).
+// perPage controls page size (0 uses the API default).
 // tagIDs filters results to contacts with all specified tag IDs.
-func (c *Client) ListContacts(ctx context.Context, afterID int, tagIDs []int) ([]Contact, error) {
-	endpoint := fmt.Sprintf("%s/workspaces/%d/contacts", c.baseURL(), c.WorkspaceID)
+func (c *Client) ListContacts(ctx context.Context, afterID int, perPage int, tagIDs []int) ([]Contact, error) {
+	endpoint := fmt.Sprintf("%s/workspaces/%s/contacts", c.baseURL(), c.WorkspaceID)
 
 	params := url.Values{}
 	if afterID > 0 {
 		params.Set("after", strconv.Itoa(afterID))
+	}
+	if perPage > 0 {
+		params.Set("per_page", strconv.Itoa(perPage))
 	}
 	if len(tagIDs) > 0 {
 		parts := make([]string, len(tagIDs))
@@ -128,12 +133,13 @@ func (c *Client) ListContacts(ctx context.Context, afterID int, tagIDs []int) ([
 
 	resp, err := c.do(req)
 	if err != nil {
-		return nil, fmt.Errorf("clickfunnels: list contacts request: %w", err)
+		return nil, fmt.Errorf("clickfunnels: list contacts request (url=%s): %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("clickfunnels: list contacts: unexpected status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("clickfunnels: list contacts: status %d url=%s body=%s", resp.StatusCode, endpoint, string(body))
 	}
 
 	var contacts []Contact
@@ -141,6 +147,35 @@ func (c *Client) ListContacts(ctx context.Context, afterID int, tagIDs []int) ([
 		return nil, fmt.Errorf("clickfunnels: decode list contacts response: %w", err)
 	}
 	return contacts, nil
+}
+
+// GetAllContacts fetches contacts, paginating until maxRecords is reached or results are exhausted.
+// perPage controls page size. maxRecords caps the total (0 = no cap, use carefully).
+// onPage is called after each page with the running total so callers can log progress.
+func (c *Client) GetAllContacts(ctx context.Context, perPage int, maxRecords int, tagIDs []int, onPage func(pageNum, total int)) ([]Contact, error) {
+	var all []Contact
+	afterID := 0
+	pageNum := 0
+	for {
+		page, err := c.ListContacts(ctx, afterID, perPage, tagIDs)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		all = append(all, page...)
+		pageNum++
+		if onPage != nil {
+			onPage(pageNum, len(all))
+		}
+		if maxRecords > 0 && len(all) >= maxRecords {
+			all = all[:maxRecords]
+			break
+		}
+		afterID = page[len(page)-1].ID
+	}
+	return all, nil
 }
 
 // GetContact fetches a single contact by its numeric ID.
@@ -171,7 +206,7 @@ func (c *Client) GetContact(ctx context.Context, id int) (*Contact, error) {
 
 // CreateContact creates a new contact in the workspace.
 func (c *Client) CreateContact(ctx context.Context, params ContactParams) (*Contact, error) {
-	endpoint := fmt.Sprintf("%s/workspaces/%d/contacts", c.baseURL(), c.WorkspaceID)
+	endpoint := fmt.Sprintf("%s/workspaces/%s/contacts", c.baseURL(), c.WorkspaceID)
 
 	body, err := json.Marshal(map[string]ContactParams{"contact": params})
 	if err != nil {

@@ -26,6 +26,7 @@ type Node struct {
 	// {{key}} template interpolation against the workflow context.
 	Input        map[string]any `json:"input,omitempty"`
 	Transitions      []Transition   `json:"transitions"`
+	Label            string         `json:"label,omitempty"`            // display label shown in the builder
 	IsHuman          bool           `json:"is_human"`           // true = human-in-the-middle pause
 	NeedsConversion  bool           `json:"needs_conversion,omitempty"` // flagged to be rewritten as a native Go activity
 }

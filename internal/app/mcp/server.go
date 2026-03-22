@@ -523,7 +523,7 @@ func (s *MCPServer) cfListContacts(ctx context.Context, args map[string]interfac
 		}
 	}
 
-	contacts, err := s.cfClient.ListContacts(ctx, afterID, tagIDs)
+	contacts, err := s.cfClient.ListContacts(ctx, afterID, 100, tagIDs)
 	if err != nil {
 		return errorResponse(fmt.Sprintf("list contacts failed: %v", err)), err
 	}
