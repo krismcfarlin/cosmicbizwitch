@@ -30,6 +30,36 @@ func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfun
 // ── Activities ────────────────────────────────────────────────────────────────
 
 func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client) {
+	// test_data: injects a static JSON payload into the workflow context for debugging.
+	// When the workflow was started by a real trigger (_source == "trigger"), this
+	// node is skipped so live data is used instead.
+	eng.RegisterActivityWithMeta("test_data",
+		func(_ context.Context, input map[string]any) (map[string]any, error) {
+			if src, _ := input["_source"].(string); src == "trigger" {
+				return nil, workflow.ErrSkip
+			}
+			raw, _ := input["data"].(string)
+			if raw == "" {
+				return map[string]any{}, nil
+			}
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+				return nil, fmt.Errorf("test_data: invalid JSON in 'data' field: %w", err)
+			}
+			return parsed, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "Utility",
+			Description: "Injects test JSON data into the workflow context. Automatically skipped when triggered by a real webhook/cron/record-hook so live data is used instead.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "data", Type: "string", Description: "JSON object string to merge into context (e.g. {\"contact_id\": \"123\"})"},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "*", Type: "any", Description: "All keys from the parsed JSON object"},
+			},
+		},
+	)
+
 	// echo: returns its input unchanged. Useful as a pass-through step.
 	eng.RegisterActivityWithMeta("echo",
 		func(_ context.Context, input map[string]any) (map[string]any, error) {

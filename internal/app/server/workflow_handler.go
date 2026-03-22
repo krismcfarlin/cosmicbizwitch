@@ -88,6 +88,17 @@ func (s *Server) handleWorkflowGet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleWorkflowDelete permanently deletes a workflow and its activity instances.
+// DELETE /api/workflows/{id}
+func (s *Server) handleWorkflowDelete(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.engine.Store().DeleteWorkflow(r.Context(), id); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "delete workflow failed", err)
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 // handleWorkflowCancel cancels a workflow.
 // POST /api/workflows/{id}/cancel
 func (s *Server) handleWorkflowCancel(w http.ResponseWriter, r *http.Request) {

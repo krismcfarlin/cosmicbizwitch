@@ -78,6 +78,7 @@ rsync -av --delete \
   --exclude='.env' \
   --exclude='.env.*' \
   --exclude='deploy.sh' \
+  --exclude='web/node_modules/' \
   --exclude='*.service' \
   --exclude='backups/' \
   . "root@$SERVER:$REMOTE_SRC/"
@@ -88,7 +89,7 @@ rsync -av --delete \
 echo "==> Building on server (CGO, linux/amd64) ..."
 ssh "root@$SERVER" bash <<'ENDSSH'
   set -euo pipefail
-  export PATH=$PATH:/usr/local/go/bin
+  export PATH=/usr/local/go/bin:$PATH
   cd /opt/cosmicbizwitch/src
 
   echo "  go version: $(go version)"

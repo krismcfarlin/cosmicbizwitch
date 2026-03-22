@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -9,6 +10,11 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// ErrSkip is returned by an activity to signal it should be marked as skipped
+// rather than completed or failed. The workflow continues normally; no output
+// is merged into the context.
+var ErrSkip = errors.New("activity skipped")
 
 // ActivityMeta holds documentation for a registered activity (for the visual builder UI).
 type ActivityMeta struct {
