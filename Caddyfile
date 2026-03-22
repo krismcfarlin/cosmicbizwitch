@@ -1,0 +1,3 @@
+server.cosmicbizwitch.com {
+    reverse_proxy localhost:8085
+}

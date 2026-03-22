@@ -1,0 +1,33 @@
+[Unit]
+Description=Cosmic Biz Witch
+After=network.target
+
+[Service]
+Type=simple
+User=cosmicbizwitch
+Group=cosmicbizwitch
+WorkingDirectory=/opt/cosmicbizwitch
+ExecStart=/opt/cosmicbizwitch/cosmicbizwitch serve --http=0.0.0.0:8085
+
+EnvironmentFile=/opt/cosmicbizwitch/.env
+
+Restart=on-failure
+RestartSec=10s
+StartLimitInterval=5min
+StartLimitBurst=3
+
+LimitNOFILE=65536
+LimitNPROC=4096
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cosmicbizwitch/data
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cosmicbizwitch
+
+[Install]
+WantedBy=multi-user.target
