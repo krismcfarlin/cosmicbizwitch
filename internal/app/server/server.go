@@ -111,6 +111,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workflows/{id}/activities", s.requireAuth(s.handleWorkflowActivities))
 	mux.HandleFunc("GET /api/workflows", s.requireAuth(s.handleWorkflowList))
 	mux.HandleFunc("POST /api/workflows", s.requireAuth(s.handleWorkflowCreate))
+	mux.HandleFunc("DELETE /api/workflows/{id}", s.requireAuth(s.handleWorkflowDelete))
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", s.requireAuth(s.handleWorkflowCancel))
 	mux.HandleFunc("POST /api/workflows/{id}/restart", s.requireAuth(s.handleWorkflowRestart))
 	mux.HandleFunc("POST /api/workflows/{id}/trigger", s.requireAuth(s.handleWorkflowTrigger))

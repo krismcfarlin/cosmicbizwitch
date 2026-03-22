@@ -112,6 +112,13 @@ export default function WorkflowList() {
     fetchWorkflows()
   }
 
+  const deleteWorkflow = async (id: string, name: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!confirm(`Delete workflow "${name || id.slice(0, 8)}"? This cannot be undone.`)) return
+    await fetch(`/api/workflows/${id}`, { method: 'DELETE' })
+    setWorkflows(prev => prev.filter(w => w.id !== id))
+  }
+
   const restart = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation()
     await fetch(`/api/workflows/${id}/restart`, { method: 'POST' })
@@ -204,6 +211,7 @@ export default function WorkflowList() {
                         {['completed', 'failed', 'cancelled'].includes(wf.status) && (
                           <button onClick={e => restart(wf.id, e)} style={actionBtn('#667eea')}>Restart</button>
                         )}
+                        <button onClick={e => deleteWorkflow(wf.id, wf.name, e)} style={actionBtn('#c0392b')}>Delete</button>
                       </div>
                     </td>
                   </tr>

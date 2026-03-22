@@ -171,6 +171,17 @@ func (s *PBStore) ListActivityInstances(_ context.Context, workflowID string) ([
 	return out, nil
 }
 
+func (s *PBStore) DeleteWorkflow(ctx context.Context, id string) error {
+	if err := s.DeleteActivityInstancesForWorkflow(ctx, id); err != nil {
+		return err
+	}
+	rec, err := s.app.FindRecordById(colWorkflows, id)
+	if err != nil {
+		return err
+	}
+	return s.app.Delete(rec)
+}
+
 func (s *PBStore) DeleteActivityInstancesForWorkflow(_ context.Context, workflowID string) error {
 	records, err := s.app.FindRecordsByFilter(
 		colActivities,

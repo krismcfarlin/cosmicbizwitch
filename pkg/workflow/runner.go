@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -261,6 +262,16 @@ func (e *Engine) executeActivity(ctx context.Context, wf *Workflow, node *Node, 
 		}
 
 		output, err := fn(ctx, inst.Input)
+		if errors.Is(err, ErrSkip) {
+			finished := time.Now().UTC()
+			inst.Status = ActivitySkipped
+			inst.FinishedAt = &finished
+			inst.UpdatedAt = finished
+			_ = e.store.UpdateActivityInstance(ctx, inst)
+			e.broadcast(Event{Type: "activity_update", Activity: inst})
+			e.logger.Printf("[workflow] node %s skipped in workflow %s", node.ID, wf.ID)
+			return inst, nil
+		}
 		if err == nil {
 			finished := time.Now().UTC()
 			inst.Output = output

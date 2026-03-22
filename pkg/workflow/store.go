@@ -17,6 +17,9 @@ type Store interface {
 	UpdateActivityInstance(ctx context.Context, inst *ActivityInstance) error
 	ListActivityInstances(ctx context.Context, workflowID string) ([]*ActivityInstance, error)
 
+	// DeleteWorkflow removes a workflow and all its activity instances.
+	DeleteWorkflow(ctx context.Context, id string) error
+
 	// DeleteActivityInstancesForWorkflow removes all instances (used on restart).
 	DeleteActivityInstancesForWorkflow(ctx context.Context, workflowID string) error
 

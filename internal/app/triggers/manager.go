@@ -164,6 +164,11 @@ func (m *Manager) fire(ctx context.Context, t *Trigger, payload map[string]any) 
 	for k, v := range payload {
 		merged[k] = v
 	}
+	// Mark all trigger-fired workflows so test_data nodes can detect they
+	// should be skipped (vs. a manual debug run which has no _source key).
+	if _, alreadySet := merged["_source"]; !alreadySet {
+		merged["_source"] = "trigger"
+	}
 	wf, err := m.engine.CreateWorkflow(ctx, t.Name, t.GraphName, merged, nil)
 	if err != nil {
 		return nil, fmt.Errorf("trigger %q: %w", t.Name, err)
