@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
 interface FieldMeta { name: string; type: string; description: string }
-interface ActivityMeta { description: string; input_fields: FieldMeta[]; output_fields: FieldMeta[] }
+interface ActivityMeta { description: string; category?: string; input_fields: FieldMeta[]; output_fields: FieldMeta[] }
 interface ActivityInfo { name: string; meta: ActivityMeta }
 
 interface BNode {
@@ -35,8 +35,8 @@ const NODE_H = 52
 const PORT_R = 6
 const OPERATORS = ['eq', 'neq', 'gt', 'lt', 'gte', 'lte', 'contains', 'exists', 'not_exists']
 
-let _nc = 0; const newNid = () => `node_${++_nc}`
-let _ec = 0; const newEid = () => `edge_${++_ec}`
+const newNid = () => `n_${Math.random().toString(36).slice(2, 9)}`
+const newEid = () => `e_${Math.random().toString(36).slice(2, 9)}`
 
 function parseVal(s: string): unknown {
   if (s === 'true') return true
@@ -105,6 +105,37 @@ function ActivityCard({ info, onDragStart }: { info: ActivityInfo; onDragStart: 
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// ── CategoryGroup (sidebar) ───────────────────────────────────────────────────
+
+function CategoryGroup({ category, activities, onDragStart, open, onOpen }: {
+  category: string
+  activities: ActivityInfo[]
+  onDragStart: (name: string) => void
+  open: boolean
+  onOpen: () => void
+}) {
+  return (
+    <div style={{ marginBottom: '8px' }}>
+      <button
+        onClick={onOpen}
+        style={{
+          width: '100%', textAlign: 'left', background: '#f0f2f5', border: 'none',
+          borderRadius: '4px', padding: '4px 8px', cursor: 'pointer',
+          fontSize: '10px', fontWeight: 700, color: '#555', textTransform: 'uppercase',
+          letterSpacing: '0.4px', display: 'flex', justifyContent: 'space-between',
+          alignItems: 'center', marginBottom: open ? '6px' : '0',
+        }}
+      >
+        <span>{category}</span>
+        <span style={{ fontSize: '10px', color: '#999' }}>{open ? '▾' : '▸'}</span>
+      </button>
+      {open && activities.map(a => (
+        <ActivityCard key={a.name} info={a} onDragStart={onDragStart} />
+      ))}
     </div>
   )
 }
@@ -274,19 +305,1420 @@ function PythonPanel({ code, onCodeChange, needsConversion, onNeedsConversionCha
   )
 }
 
+// ── Fuzzy field matching helpers ─────────────────────────────────────────────
+
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length
+  const dp: number[] = Array.from({ length: n + 1 }, (_, i) => i)
+  for (let i = 1; i <= m; i++) {
+    let prev = i
+    for (let j = 1; j <= n; j++) {
+      const cur = a[i - 1] === b[j - 1] ? dp[j - 1] : 1 + Math.min(dp[j - 1], dp[j], prev)
+      dp[j - 1] = prev
+      prev = cur
+    }
+    dp[n] = prev
+  }
+  return dp[n]
+}
+
+// Given a field name and a list of source paths, return the best-matching path
+// or null if no reasonable match exists. Scoring priority:
+//  1. Exact match on full path
+//  2. Last dot-segment exactly equals field name
+//  3. Lowest Levenshtein distance on last segment (only if distance <= half field length)
+function bestMatch(field: string, paths: string[]): string | null {
+  if (!paths.length) return null
+  const norm = (s: string) => s.toLowerCase().replace(/[_\s]/g, '')
+  const nf = norm(field)
+
+  // 1. Exact full path
+  const exact = paths.find(p => norm(p) === nf)
+  if (exact) return exact
+
+  // 2. Last segment exact
+  const segExact = paths.find(p => norm(p.split('.').pop()!) === nf)
+  if (segExact) return segExact
+
+  // 3. Levenshtein on last segment
+  let best: string | null = null
+  let bestDist = Infinity
+  for (const p of paths) {
+    const seg = p.split('.').pop()!
+    const dist = levenshtein(nf, norm(seg))
+    if (dist < bestDist) { bestDist = dist; best = p }
+  }
+  // Only accept if distance is at most half the field name length
+  if (best && bestDist <= Math.max(2, Math.floor(nf.length / 2))) return best
+  return null
+}
+
+// ── PbQueryBuilderModal ───────────────────────────────────────────────────────
+
+interface QueryFilter { id: string; field: string; operator: string; value: string }
+interface QueryConfig {
+  tableName: string
+  resultKey: string
+  filters: QueryFilter[]
+  filterMode: 'and' | 'or'
+  sortField: string
+  sortDir: 'asc' | 'desc'
+  limit: number
+}
+
+const PB_OPERATORS: Record<string, Array<{ value: string; label: string }>> = {
+  text:   [{ value: 'eq', label: '= equals' }, { value: 'neq', label: '≠ not equals' }, { value: 'contains', label: '~ contains' }, { value: 'not_contains', label: '!~ doesn\'t contain' }],
+  number: [{ value: 'eq', label: '= equals' }, { value: 'neq', label: '≠ not equals' }, { value: 'gt', label: '> greater' }, { value: 'gte', label: '≥ ≥ or equal' }, { value: 'lt', label: '< less' }, { value: 'lte', label: '≤ ≤ or equal' }],
+  bool:   [{ value: 'eq', label: '= equals' }, { value: 'neq', label: '≠ not equals' }],
+  date:   [{ value: 'eq', label: '= equals' }, { value: 'neq', label: '≠ not equals' }, { value: 'gt', label: '> after' }, { value: 'gte', label: '≥ on or after' }, { value: 'lt', label: '< before' }, { value: 'lte', label: '≤ on or before' }],
+}
+const ALL_OPERATORS = [
+  { value: 'eq', label: '= equals' }, { value: 'neq', label: '≠ not equals' },
+  { value: 'gt', label: '> greater' }, { value: 'gte', label: '≥ or equal' },
+  { value: 'lt', label: '< less' }, { value: 'lte', label: '≤ or equal' },
+  { value: 'contains', label: '~ contains' }, { value: 'not_contains', label: '!~ doesn\'t contain' },
+]
+function getOperatorsForType(type: string) {
+  if (type === 'number' || type === 'int' || type === 'float') return PB_OPERATORS.number
+  if (type === 'bool') return PB_OPERATORS.bool
+  if (type === 'date' || type === 'datetime' || type === 'autodate') return PB_OPERATORS.date
+  if (type === 'text' || type === 'email' || type === 'url' || type === 'editor' || type === 'select') return PB_OPERATORS.text
+  return ALL_OPERATORS
+}
+
+const LIMIT_OPTIONS = [1, 5, 10, 25, 50, 100, 250, 500]
+const qid = () => Math.random().toString(36).slice(2, 8)
+
+function PbQueryBuilderModal({ existing, defaultSourceJson, onSave, onClose }: {
+  existing: QueryConfig
+  defaultSourceJson: string
+  onSave: (cfg: QueryConfig) => void
+  onClose: () => void
+}) {
+  const dragRef = useRef<string>('')
+  const [tableName, setTableName] = useState(existing.tableName)
+  const [resultKey, setResultKey] = useState(existing.resultKey)
+  const [filters, setFilters] = useState<QueryFilter[]>(existing.filters.length ? existing.filters : [{ id: qid(), field: '', operator: 'eq', value: '' }])
+  const [filterMode, setFilterMode] = useState<'and' | 'or'>(existing.filterMode)
+  const [sortField, setSortField] = useState(existing.sortField)
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>(existing.sortDir)
+  const [limit, setLimit] = useState(existing.limit || 50)
+  const [schema, setSchema] = useState<Array<{ name: string; type: string }>>([])
+  const [schemaLoading, setSchemaLoading] = useState(false)
+  const [sourceText, setSourceText] = useState(defaultSourceJson)
+  const [sourceParseError, setSourceParseError] = useState('')
+  const [sourcePaths, setSourcePaths] = useState<string[]>([])
+  const [sourceValues, setSourceValues] = useState<Record<string, unknown>>({})
+  const [sourceFilter, setSourceFilter] = useState(() => {
+    try {
+      const p = JSON.parse(defaultSourceJson)
+      if (p && typeof p === 'object' && 'item' in p) return 'item.'
+    } catch { /* ignore */ }
+    return ''
+  })
+  const [hiddenSourceKeys, setHiddenSourceKeys] = useState<Set<string>>(new Set())
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+
+  // Auto-parse context keys on open
+  useEffect(() => {
+    if (!defaultSourceJson.trim()) return
+    try {
+      const parsed = JSON.parse(defaultSourceJson)
+      const out: string[] = []
+      collectLeafPaths(parsed, '', 0, out)
+      setSourcePaths(out.filter(p => p !== ''))
+      setSourceValues(buildValueMap(parsed))
+    } catch { /* ignore */ }
+  }, [defaultSourceJson])
+
+  // Fetch schema when tableName changes
+  useEffect(() => {
+    if (!tableName.trim()) return
+    setSchemaLoading(true)
+    fetch(`/api/pb/collections/${encodeURIComponent(tableName)}/fields`)
+      .then(r => r.json())
+      .then((data: { fields?: Array<{ name: string; type: string }> }) => {
+        if (data.fields) setSchema(data.fields)
+      })
+      .catch(() => {})
+      .finally(() => setSchemaLoading(false))
+  }, [tableName])
+
+  const parseSource = () => {
+    setSourceParseError('')
+    setSourcePaths([])
+    let parsed: unknown
+    try { parsed = JSON.parse(sourceText) } catch { setSourceParseError('Invalid JSON.'); return }
+    const out: string[] = []
+    collectLeafPaths(parsed, '', 0, out)
+    setSourcePaths(out.filter(p => p !== ''))
+    setSourceValues(buildValueMap(parsed))
+  }
+
+  const addFilter = () => setFilters(prev => [...prev, { id: qid(), field: '', operator: 'eq', value: '' }])
+  const removeFilter = (id: string) => setFilters(prev => prev.filter(f => f.id !== id))
+  const updateFilter = (id: string, patch: Partial<QueryFilter>) =>
+    setFilters(prev => prev.map(f => f.id === id ? { ...f, ...patch } : f))
+
+  const schemaTypeFor = (fieldName: string) => schema.find(s => s.name === fieldName)?.type ?? ''
+
+  const handleSave = () => {
+    onSave({ tableName, resultKey, filters: filters.filter(f => f.field), filterMode, sortField, sortDir, limit })
+    onClose()
+  }
+
+  // Styles
+  const selStyle: React.CSSProperties = { padding: '4px 6px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '12px', background: 'white', cursor: 'pointer' }
+  const valInputStyle: React.CSSProperties = { flex: 1, padding: '4px 8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '12px', fontFamily: 'monospace', minWidth: 0 }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '900px', maxHeight: '88vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: '#1e293b', color: 'white' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: '15px' }}>
+              PocketBase Query Builder
+              {tableName && <span style={{ marginLeft: '8px', fontSize: '12px', color: '#7c3aed', background: '#ede9fe', borderRadius: '4px', padding: '1px 6px' }}>{tableName}</span>}
+              {schemaLoading && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#94a3b8' }}>loading schema…</span>}
+            </div>
+            <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>Build a filter query visually — drag context keys into value fields</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#94a3b8', lineHeight: 1 }}>✕</button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflow: 'auto', display: 'flex', gap: 0, minHeight: 0 }}>
+
+          {/* LEFT — Context Keys */}
+          <div style={{ flex: '0 0 260px', borderRight: '1px solid #e0e6ed', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Context Keys <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag into values)</span>
+            </div>
+            <textarea
+              value={sourceText}
+              onChange={e => setSourceText(e.target.value)}
+              rows={6}
+              spellCheck={false}
+              placeholder={'{\n  "email": "user@example.com"\n}'}
+              style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+            />
+            {sourceParseError && <div style={{ color: '#e74c3c', fontSize: '11px' }}>{sourceParseError}</div>}
+            <button onClick={parseSource} style={{ padding: '5px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}>
+              Parse Keys
+            </button>
+            {sourcePaths.length > 0 && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', whiteSpace: 'nowrap' }}>SOURCE KEYS:</div>
+                  <input type="text" placeholder="filter..." value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}
+                    style={{ flex: 1, fontSize: '10px', padding: '3px 6px', border: '1px solid #ddd', borderRadius: '4px', fontFamily: 'monospace', minWidth: 0 }} />
+                  {sourceFilter && <button onClick={() => setSourceFilter('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#aaa', fontSize: '12px', padding: 0, lineHeight: 1 }}>✕</button>}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  {sourcePaths.filter(p => !hiddenSourceKeys.has(p) && (!sourceFilter || p.toLowerCase().includes(sourceFilter.toLowerCase()))).map(p => (
+                    <div key={p} draggable onDragStart={() => { dragRef.current = p }} onDragEnd={() => { dragRef.current = '' }}
+                      title={p in sourceValues ? fmtVal(sourceValues[p]) : undefined}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', background: '#dbeafe', border: '1px solid #93c5fd', borderRadius: '4px', padding: '3px 7px', fontFamily: 'monospace', fontSize: '10px', color: '#1e40af', cursor: 'grab', userSelect: 'none' }}>
+                      <span style={{ pointerEvents: 'none' }}>{p}</span>
+                      <span
+                        draggable={false}
+                        onMouseDown={e => { e.stopPropagation(); e.preventDefault() }}
+                        onClick={e => { e.stopPropagation(); setHiddenSourceKeys(prev => new Set([...prev, p])) }}
+                        style={{ cursor: 'pointer', color: '#93c5fd', fontSize: '9px', lineHeight: 1, paddingLeft: '2px', pointerEvents: 'all' }}
+                        title="Hide this key"
+                      >✕</span>
+                    </div>
+                  ))}
+                  {hiddenSourceKeys.size > 0 && (
+                    <button onClick={() => setHiddenSourceKeys(new Set())} style={{ fontSize: '10px', color: '#6b7280', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px', textDecoration: 'underline', alignSelf: 'center' }}>
+                      show {hiddenSourceKeys.size} hidden
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* RIGHT — Query config */}
+          <div style={{ flex: 1, padding: '16px', display: 'flex', flexDirection: 'column', gap: '14px', overflow: 'auto' }}>
+
+            {/* Row 1: Table + Result Key + Limit */}
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#555', display: 'block', marginBottom: '4px' }}>Table</label>
+                <input value={tableName} onChange={e => setTableName(e.target.value)} style={{ ...selStyle, width: '100%', boxSizing: 'border-box' }} placeholder="collection name" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#555', display: 'block', marginBottom: '4px' }}>
+                  Result Key
+                  <span title="Stores all output under this context key, e.g. &quot;contacts&quot; → {{contacts.records}}. Required when using multiple pb_query nodes." style={{ marginLeft: '4px', color: '#0ea5e9', cursor: 'help' }}>ℹ</span>
+                </label>
+                <input value={resultKey} onChange={e => setResultKey(e.target.value)} style={{ ...selStyle, width: '100%', boxSizing: 'border-box' }} placeholder="e.g. contacts" />
+              </div>
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#555', display: 'block', marginBottom: '4px' }}>Limit</label>
+                <select value={limit} onChange={e => setLimit(Number(e.target.value))} style={selStyle}>
+                  {LIMIT_OPTIONS.map(l => <option key={l} value={l}>{l}</option>)}
+                </select>
+              </div>
+            </div>
+
+            {/* Row 2: Sort */}
+            <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-end' }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#555', display: 'block', marginBottom: '4px' }}>Sort by</label>
+                {schema.length > 0
+                  ? <select value={sortField} onChange={e => setSortField(e.target.value)} style={{ ...selStyle, width: '100%' }}>
+                      <option value="">— none —</option>
+                      {schema.map(f => <option key={f.name} value={f.name}>{f.name}</option>)}
+                    </select>
+                  : <input value={sortField} onChange={e => setSortField(e.target.value)} style={{ ...selStyle, width: '100%', boxSizing: 'border-box' }} placeholder="field name" />
+                }
+              </div>
+              <div>
+                <label style={{ fontSize: '11px', fontWeight: 600, color: '#555', display: 'block', marginBottom: '4px' }}>Direction</label>
+                <select value={sortDir} onChange={e => setSortDir(e.target.value as 'asc' | 'desc')} style={selStyle}>
+                  <option value="asc">ASC ↑</option>
+                  <option value="desc">DESC ↓</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Filters section */}
+            <div style={{ borderTop: '1px solid #e0e6ed', paddingTop: '14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 700, color: '#334155' }}>Filters</span>
+                  <div style={{ display: 'flex', gap: '2px', border: '1px solid #ddd', borderRadius: '4px', overflow: 'hidden' }}>
+                    {(['and', 'or'] as const).map(m => (
+                      <button key={m} onClick={() => setFilterMode(m)}
+                        style={{ padding: '3px 10px', fontSize: '11px', fontWeight: 600, border: 'none', cursor: 'pointer', background: filterMode === m ? '#334155' : 'white', color: filterMode === m ? 'white' : '#555' }}>
+                        {m.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                  <span style={{ fontSize: '11px', color: '#94a3b8' }}>
+                    {filterMode === 'and' ? 'All conditions must match' : 'Any condition must match'}
+                  </span>
+                </div>
+                <button onClick={addFilter}
+                  style={{ padding: '4px 12px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}>
+                  + Add Filter
+                </button>
+              </div>
+
+              {filters.length === 0 && (
+                <div style={{ textAlign: 'center', padding: '20px', color: '#94a3b8', fontSize: '12px', border: '1px dashed #ddd', borderRadius: '6px' }}>
+                  No filters — returns all records (up to limit)
+                </div>
+              )}
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {filters.map((f, idx) => {
+                  const fieldType = schemaTypeFor(f.field)
+                  const ops = getOperatorsForType(fieldType)
+                  const isOver = dragOverIdx === idx
+                  return (
+                    <div key={f.id}
+                      style={{ display: 'flex', gap: '6px', alignItems: 'center', padding: '8px', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e0e6ed' }}>
+                      {/* Field */}
+                      {schema.length > 0
+                        ? <select value={f.field} onChange={e => updateFilter(f.id, { field: e.target.value, operator: 'eq' })} style={{ ...selStyle, minWidth: '130px' }}>
+                            <option value="">— field —</option>
+                            {schema.map(s => <option key={s.name} value={s.name}>{s.name}</option>)}
+                          </select>
+                        : <input value={f.field} onChange={e => updateFilter(f.id, { field: e.target.value })}
+                            style={{ ...selStyle, width: '120px' }} placeholder="field" />
+                      }
+                      {/* Operator */}
+                      <select value={f.operator} onChange={e => updateFilter(f.id, { operator: e.target.value })} style={{ ...selStyle, minWidth: '150px' }}>
+                        {ops.map(op => <option key={op.value} value={op.value}>{op.label}</option>)}
+                      </select>
+                      {/* Value — droppable */}
+                      <div style={{ flex: 1, position: 'relative' }}
+                        onDragOver={e => { e.preventDefault(); setDragOverIdx(idx) }}
+                        onDragLeave={() => setDragOverIdx(null)}
+                        onDrop={() => {
+                          if (dragRef.current) updateFilter(f.id, { value: `{{${dragRef.current}}}` })
+                          setDragOverIdx(null)
+                        }}>
+                        <input
+                          value={f.value}
+                          onChange={e => updateFilter(f.id, { value: e.target.value })}
+                          style={{ ...valInputStyle, border: isOver ? '2px solid #22c55e' : '1px solid #ddd', background: isOver ? '#f0fdf4' : 'white' }}
+                          placeholder="value or {{context.key}}"
+                        />
+                      </div>
+                      {/* Remove */}
+                      <button onClick={() => removeFilter(f.id)}
+                        style={{ padding: '4px 8px', background: 'none', border: '1px solid #fca5a5', borderRadius: '4px', cursor: 'pointer', color: '#ef4444', fontSize: '13px', lineHeight: 1, flexShrink: 0 }}>
+                        ✕
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', padding: '12px 20px', borderTop: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+            Cancel
+          </button>
+          <button onClick={handleSave} style={{ padding: '8px 20px', background: '#0ea5e9', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>
+            Apply Query
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── PbDataMapperModal (pb_update / pb_create) ────────────────────────────────
+
+function PbDataMapperModal({ existingData, existingId, existingResultKey, defaultSourceJson, tableName, onSave, onSaveId, onSaveResultKey, onClose, mode }: {
+  existingData: string
+  existingId: string
+  existingResultKey: string
+  defaultSourceJson: string
+  tableName: string
+  onSave: (data: string) => void
+  onSaveId: (id: string) => void
+  onSaveResultKey: (key: string) => void
+  onClose: () => void
+  mode: 'create' | 'update' | 'upsert' | 'delete'
+}) {
+  const needsId = mode === 'update' || mode === 'upsert' || mode === 'delete'
+  const hasDataFields = mode !== 'delete'
+  const dragRef = useRef<string>('')
+  const [sourceText, setSourceText] = useState(defaultSourceJson)
+  const [sourceParseError, setSourceParseError] = useState('')
+  const [sourcePaths, setSourcePaths] = useState<string[]>([])
+  const [sourceValues, setSourceValues] = useState<Record<string, unknown>>({})
+  const [sourceFilter, setSourceFilter] = useState(() => {
+    try {
+      const p = JSON.parse(defaultSourceJson)
+      if (p && typeof p === 'object' && 'item' in p) return 'item.'
+    } catch { /* ignore */ }
+    return ''
+  })
+  const [hiddenSourceKeys, setHiddenSourceKeys] = useState<Set<string>>(new Set())
+  const [schemaLoading, setSchemaLoading] = useState(false)
+  const [rows, setRows] = useState<Array<{ field: string; value: string }>>(() => {
+    try {
+      const parsed = JSON.parse(existingData)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return Object.entries(parsed as Record<string, string>).map(([field, value]) => ({ field, value: String(value) }))
+      }
+    } catch { /* fall through */ }
+    return [{ field: '', value: '' }]
+  })
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+  const [idValue, setIdValue] = useState(existingId)
+  const [dragOverId, setDragOverId] = useState(false)
+  const [resultKey, setResultKey] = useState(existingResultKey)
+
+  useEffect(() => {
+    if (defaultSourceJson.trim() === '') return
+    try {
+      const parsed = JSON.parse(defaultSourceJson)
+      const out: string[] = []
+      collectLeafPaths(parsed, '', 0, out)
+      setSourcePaths(out.filter(p => p !== ''))
+      setSourceValues(buildValueMap(parsed))
+    } catch { /* ignore */ }
+  }, [defaultSourceJson])
+
+  // Fetch schema fields when tableName is provided
+  useEffect(() => {
+    if (!tableName) return
+    setSchemaLoading(true)
+    fetch(`/api/pb/collections/${encodeURIComponent(tableName)}/fields`)
+      .then(r => r.json())
+      .then((data: { fields?: Array<{ name: string; type: string }> }) => {
+        if (!data.fields) return
+        setRows(prev => {
+          const existingFields = new Set(prev.filter(r => r.field).map(r => r.field))
+          const newRows = data.fields!
+            .filter(f => !existingFields.has(f.name))
+            .map(f => ({ field: f.name, value: '' }))
+          const base = prev.filter(r => r.field) // drop blank placeholder rows
+          return [...base, ...newRows]
+        })
+      })
+      .catch(() => { /* schema fetch failed — silently ignore */ })
+      .finally(() => setSchemaLoading(false))
+  }, [tableName])
+
+  const parseSource = () => {
+    setSourceParseError('')
+    setSourcePaths([])
+    let parsed: unknown
+    try { parsed = JSON.parse(sourceText) } catch { setSourceParseError('Invalid JSON.'); return }
+    const out: string[] = []
+    collectLeafPaths(parsed, '', 0, out)
+    setSourcePaths(out.filter(p => p !== ''))
+    setSourceValues(buildValueMap(parsed))
+  }
+
+  const handleDrop = (i: number) => {
+    const from = dragRef.current
+    if (!from) return
+    setRows(prev => prev.map((r, idx) => idx === i ? { ...r, value: `{{${from}}}` } : r))
+    setDragOverIdx(null)
+  }
+
+  const visibleSourcePaths = sourcePaths.filter(p =>
+    !hiddenSourceKeys.has(p) && (!sourceFilter || p.toLowerCase().includes(sourceFilter.toLowerCase()))
+  )
+
+  const handleBestGuess = () => {
+    setRows(prev => prev.map(row => {
+      if (!row.field || row.value) return row // skip already-mapped or blank field rows
+      const match = bestMatch(row.field, visibleSourcePaths)
+      return match ? { ...row, value: `{{${match}}}` } : row
+    }))
+  }
+
+  const handleSave = () => {
+    if (needsId) onSaveId(idValue)
+    onSaveResultKey(resultKey)
+    if (hasDataFields) {
+      const obj: Record<string, string> = {}
+      for (const r of rows) {
+        if (r.field.trim() !== '') obj[r.field.trim()] = r.value
+      }
+      onSave(JSON.stringify(obj))
+    }
+    onClose()
+  }
+
+  const titles: Record<string, string> = {
+    update: 'PocketBase Update Mapper',
+    create: 'PocketBase Create Mapper',
+    upsert: 'PocketBase Upsert Mapper',
+    delete: 'PocketBase Delete',
+  }
+  const subtitles: Record<string, string> = {
+    update: 'Merge update — only specified fields change; omitted fields are untouched.',
+    create: 'Create — all specified fields are set on the new record.',
+    upsert: 'Upsert — updates the record if id is supplied, creates a new one if not.',
+    delete: 'Deletes the record with the given id.',
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '860px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: '#1e293b', color: 'white' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: '15px' }}>
+              {titles[mode]}
+              {tableName && <span style={{ marginLeft: '8px', fontSize: '12px', color: '#7c3aed', background: '#ede9fe', borderRadius: '4px', padding: '1px 6px' }}>{tableName}</span>}
+              {schemaLoading && <span style={{ marginLeft: '8px', fontSize: '11px', color: '#94a3b8' }}>loading schema…</span>}
+            </div>
+            <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>{subtitles[mode]}</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#94a3b8', lineHeight: 1 }}>✕</button>
+        </div>
+
+        {/* Result Key bar */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 20px', background: '#f8fafc', borderBottom: '1px solid #e0e6ed' }}>
+          <label style={{ fontSize: '11px', fontWeight: 600, color: '#555', whiteSpace: 'nowrap' }}>
+            Result Key
+            <span title="Store output under this context key (e.g. &quot;contact&quot; → {{contact.id}}, {{contact.record}}). Useful when multiple PB nodes share similar output keys." style={{ marginLeft: '4px', color: '#6b46c1', cursor: 'help' }}>ℹ</span>
+          </label>
+          <input
+            value={resultKey}
+            onChange={e => setResultKey(e.target.value)}
+            placeholder="optional — e.g. contact"
+            style={{ width: '200px', padding: '4px 8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '12px', fontFamily: 'monospace' }}
+          />
+          {resultKey && <span style={{ fontSize: '11px', color: '#6b46c1', fontFamily: 'monospace' }}>→ {'{{'}{ resultKey }.id{'}}'}, {'{{'}{ resultKey }.record{'}}'}</span>}
+        </div>
+
+        {/* Two-column body */}
+        <div style={{ flex: 1, overflow: 'auto', display: 'flex', gap: 0, minHeight: 0 }}>
+
+          {/* LEFT — Source Keys */}
+          <div style={{ flex: '0 0 280px', borderRight: '1px solid #e0e6ed', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Context Keys <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag from here)</span>
+            </div>
+            <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+              Paste sample JSON from the workflow context, then click Parse Keys.
+            </div>
+            <textarea
+              value={sourceText}
+              onChange={e => setSourceText(e.target.value)}
+              rows={6}
+              placeholder={'{\n  "email": "user@example.com",\n  "name": "Jane"\n}'}
+              spellCheck={false}
+              style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+            />
+            {sourceParseError && <div style={{ color: '#e74c3c', fontSize: '11px' }}>{sourceParseError}</div>}
+            <button
+              onClick={parseSource}
+              style={{ padding: '5px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}
+            >
+              Parse Keys
+            </button>
+
+            {sourcePaths.length > 0 && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', whiteSpace: 'nowrap' }}>SOURCE KEYS:</div>
+                  <input
+                    type="text"
+                    placeholder="filter..."
+                    value={sourceFilter}
+                    onChange={e => setSourceFilter(e.target.value)}
+                    style={{ flex: 1, fontSize: '10px', padding: '3px 6px', border: '1px solid #ddd', borderRadius: '4px', fontFamily: 'monospace', minWidth: 0 }}
+                  />
+                  {sourceFilter && (
+                    <button onClick={() => setSourceFilter('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#aaa', fontSize: '12px', padding: 0, lineHeight: 1 }}>✕</button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  {sourcePaths.filter(p => !hiddenSourceKeys.has(p) && (!sourceFilter || p.toLowerCase().includes(sourceFilter.toLowerCase()))).map(p => (
+                    <div
+                      key={p}
+                      draggable
+                      onDragStart={() => { dragRef.current = p }}
+                      onDragEnd={() => { dragRef.current = '' }}
+                      title={p in sourceValues ? fmtVal(sourceValues[p]) : undefined}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '3px',
+                        background: '#dbeafe', border: '1px solid #93c5fd',
+                        borderRadius: '4px', padding: '3px 7px',
+                        fontFamily: 'monospace', fontSize: '10px',
+                        color: '#1e40af', cursor: 'grab', userSelect: 'none',
+                      }}
+                    >
+                      <span style={{ pointerEvents: 'none' }}>{p}</span>
+                      <span
+                        draggable={false}
+                        onMouseDown={e => { e.stopPropagation(); e.preventDefault() }}
+                        onClick={e => { e.stopPropagation(); setHiddenSourceKeys(prev => new Set([...prev, p])) }}
+                        style={{ cursor: 'pointer', color: '#93c5fd', fontSize: '9px', lineHeight: 1, paddingLeft: '2px', pointerEvents: 'all' }}
+                        title="Hide this key"
+                      >✕</span>
+                    </div>
+                  ))}
+                </div>
+                {hiddenSourceKeys.size > 0 && (
+                  <button onClick={() => setHiddenSourceKeys(new Set())} style={{ alignSelf: 'flex-start', fontSize: '10px', color: '#6b7280', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0', textDecoration: 'underline' }}>
+                    show {hiddenSourceKeys.size} hidden
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* RIGHT — Field rows */}
+          <div style={{ flex: 1, padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+
+            {/* Pinned Record ID row */}
+            {needsId && (
+              <div style={{ background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '6px', padding: '10px 12px', marginBottom: '4px' }}>
+                <div style={{ fontSize: '10px', fontWeight: 700, color: '#7c3aed', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '6px' }}>
+                  Record ID <span style={{ fontWeight: 400, color: '#a78bfa', textTransform: 'none' }}>(required)</span>
+                </div>
+                <div
+                  onDragOver={e => { e.preventDefault(); setDragOverId(true) }}
+                  onDragLeave={() => setDragOverId(false)}
+                  onDrop={() => { if (dragRef.current) { setIdValue(`{{${dragRef.current}}}`); dragRef.current = ''; setDragOverId(false) } }}
+                  style={{
+                    display: 'flex', alignItems: 'center', minHeight: '32px',
+                    background: dragOverId ? '#ede9fe' : 'white',
+                    border: `1px dashed ${dragOverId ? '#7c3aed' : '#c4b5fd'}`,
+                    borderRadius: '4px', transition: 'background 0.1s, border-color 0.1s', overflow: 'hidden',
+                  }}
+                >
+                  <input
+                    value={idValue}
+                    onChange={e => setIdValue(e.target.value)}
+                    placeholder="{{id}} or literal id value"
+                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '5px 8px', border: 'none', background: 'transparent', outline: 'none', color: idValue.startsWith('{{') ? '#6d28d9' : '#333' }}
+                  />
+                  {idValue && <button onClick={() => setIdValue('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#c4b5fd', fontSize: '12px', padding: '0 8px', lineHeight: 1 }}>✕</button>}
+                </div>
+              </div>
+            )}
+
+            {hasDataFields && <>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Field Mappings <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drop context keys onto value cells)</span>
+            </div>
+            {rows.map((row, i) => (
+              <div key={i} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <input
+                  value={row.field}
+                  onChange={e => setRows(prev => prev.map((r, idx) => idx === i ? { ...r, field: e.target.value } : r))}
+                  placeholder="field name"
+                  style={{ flex: '0 0 140px', fontFamily: 'monospace', fontSize: '11px', padding: '5px 8px', border: '1px solid #ddd', borderRadius: '4px', boxSizing: 'border-box' }}
+                />
+                <div
+                  onDragOver={e => { e.preventDefault(); setDragOverIdx(i) }}
+                  onDragLeave={() => setDragOverIdx(null)}
+                  onDrop={() => handleDrop(i)}
+                  style={{
+                    flex: 1, minHeight: '30px', display: 'flex', alignItems: 'center',
+                    background: dragOverIdx === i ? '#dcfce7' : '#f8fafc',
+                    border: `1px dashed ${dragOverIdx === i ? '#22c55e' : '#cbd5e1'}`,
+                    borderRadius: '4px', transition: 'background 0.1s, border-color 0.1s',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <input
+                    value={row.value}
+                    onChange={e => setRows(prev => prev.map((r, idx) => idx === i ? { ...r, value: e.target.value } : r))}
+                    placeholder="value or {{key}}"
+                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '5px 8px', border: 'none', background: 'transparent', outline: 'none', boxSizing: 'border-box' }}
+                  />
+                </div>
+                <button
+                  onClick={() => setRows(prev => prev.filter((_, idx) => idx !== i))}
+                  style={{ flex: '0 0 auto', background: 'none', border: 'none', cursor: 'pointer', color: '#e74c3c', fontSize: '14px', padding: '2px 4px', lineHeight: 1 }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+            <button
+              onClick={() => setRows(prev => [...prev, { field: '', value: '' }])}
+              style={{ alignSelf: 'flex-start', padding: '5px 10px', background: '#f0f9ff', color: '#0369a1', border: '1px dashed #7dd3fc', borderRadius: '4px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, marginTop: '4px' }}
+            >
+              + Add Field
+            </button>
+            </>}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', padding: '12px 20px', borderTop: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <button
+            onClick={handleBestGuess}
+            disabled={visibleSourcePaths.length === 0}
+            title={visibleSourcePaths.length === 0 ? 'Parse context keys first' : `Auto-map unmapped fields using fuzzy matching against ${visibleSourcePaths.length} visible keys`}
+            style={{ padding: '8px 14px', background: visibleSourcePaths.length === 0 ? '#f0f0f0' : '#ede9fe', border: `1px solid ${visibleSourcePaths.length === 0 ? '#ddd' : '#c4b5fd'}`, borderRadius: '4px', cursor: visibleSourcePaths.length === 0 ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '12px', color: visibleSourcePaths.length === 0 ? '#aaa' : '#6b46c1' }}
+          >
+            ✨ Best Guess
+          </button>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button onClick={onClose} style={{ padding: '8px 16px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              style={{ padding: '8px 16px', background: '#6b46c1', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}
+            >
+              Save Mappings
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── HttpResponseMapperPanel (http_request) ────────────────────────────────────
+
+function collectLeafPaths(obj: unknown, prefix: string, depth: number, out: string[]): void {
+  if (depth > 5 || typeof obj !== 'object' || obj === null) {
+    out.push(prefix)
+    return
+  }
+  if (Array.isArray(obj)) {
+    (obj as unknown[]).forEach((item, i) => {
+      const childPath = prefix ? `${prefix}.${i}` : String(i)
+      if (typeof item === 'object' && item !== null && depth < 5) {
+        collectLeafPaths(item, childPath, depth + 1, out)
+      } else {
+        out.push(childPath)
+      }
+    })
+    return
+  }
+  const keys = Object.keys(obj as Record<string, unknown>)
+  if (keys.length === 0) { out.push(prefix); return }
+  for (const k of keys) {
+    const child = (obj as Record<string, unknown>)[k]
+    const childPath = prefix ? `${prefix}.${k}` : k
+    if (typeof child === 'object' && child !== null && depth < 5) {
+      collectLeafPaths(child, childPath, depth + 1, out)
+    } else {
+      out.push(childPath)
+    }
+  }
+}
+
+function HttpResponseMapperPanel({ node, onInsertMapperNode }: {
+  node: BNode
+  onInsertMapperNode: (sourceNodeId: string, mappings: Array<{ from: string; to: string }>) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [sampleJson, setSampleJson] = useState('')
+  const [paths, setPaths] = useState<string[]>([])
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [toNames, setToNames] = useState<Record<string, string>>({})
+  const [parseError, setParseError] = useState('')
+
+  const parsePaths = () => {
+    setParseError('')
+    setPaths([])
+    setSelected(new Set())
+    setToNames({})
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(sampleJson)
+    } catch {
+      setParseError('Invalid JSON.')
+      return
+    }
+    const out: string[] = []
+    collectLeafPaths(parsed, '', 0, out)
+    const filteredPaths = out.filter(p => p !== '')
+    const defaultSelected = new Set(filteredPaths)
+    const defaultToNames: Record<string, string> = {}
+    for (const p of filteredPaths) {
+      const segs = p.split('.')
+      defaultToNames[p] = segs[segs.length - 1]
+    }
+    setPaths(filteredPaths)
+    setSelected(defaultSelected)
+    setToNames(defaultToNames)
+  }
+
+  const togglePath = (p: string) => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(p)) next.delete(p)
+      else next.add(p)
+      return next
+    })
+  }
+
+  const insertMapper = () => {
+    const mappings = paths
+      .filter(p => selected.has(p))
+      .map(p => ({ from: p, to: toNames[p] ?? p.split('.').pop() ?? p }))
+    if (mappings.length === 0) return
+    onInsertMapperNode(node.id, mappings)
+  }
+
+  return (
+    <div style={{ marginTop: '12px', border: '1px solid #e0e6ed', borderRadius: '6px', overflow: 'hidden' }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', textAlign: 'left', background: '#f0f9ff', border: 'none',
+          padding: '7px 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 700,
+          color: '#0369a1', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        }}
+      >
+        <span>Response Mapper</span>
+        <span>{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div style={{ padding: '10px', background: 'white' }}>
+          <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '6px', lineHeight: 1.5 }}>
+            Paste a sample response JSON. Select the fields you want to map, then insert a
+            <code> mapper</code> node wired after this one.
+          </div>
+          <textarea
+            value={sampleJson}
+            onChange={e => setSampleJson(e.target.value)}
+            rows={5}
+            placeholder={'{\n  "status": "ok",\n  "data": { "id": 1 }\n}'}
+            spellCheck={false}
+            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+          />
+          {parseError && <div style={{ color: '#e74c3c', fontSize: '11px', marginTop: '4px' }}>{parseError}</div>}
+          <button
+            onClick={parsePaths}
+            style={{ marginTop: '6px', width: '100%', padding: '5px', background: '#0369a1', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}
+          >
+            Parse Paths
+          </button>
+
+          {paths.length > 0 && (
+            <>
+              <div style={{ marginTop: '8px', fontSize: '10px', fontWeight: 700, color: '#555', marginBottom: '4px' }}>
+                Select fields to map:
+              </div>
+              {paths.map(p => (
+                <div key={p} style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(p)}
+                    onChange={() => togglePath(p)}
+                    style={{ flexShrink: 0 }}
+                  />
+                  <code style={{ fontSize: '10px', color: '#2c3e50', flex: '0 0 auto', minWidth: '80px' }}>{p}</code>
+                  <span style={{ fontSize: '10px', color: '#aaa' }}>→</span>
+                  <input
+                    value={toNames[p] ?? ''}
+                    onChange={e => setToNames(prev => ({ ...prev, [p]: e.target.value }))}
+                    style={{ flex: 1, padding: '2px 4px', border: '1px solid #ddd', borderRadius: '3px', fontSize: '10px', fontFamily: 'monospace' }}
+                    placeholder="to key"
+                  />
+                </div>
+              ))}
+              <button
+                onClick={insertMapper}
+                disabled={selected.size === 0}
+                style={{ marginTop: '8px', width: '100%', padding: '5px', background: selected.size === 0 ? '#aaa' : '#0369a1', color: 'white', border: 'none', borderRadius: '4px', cursor: selected.size === 0 ? 'default' : 'pointer', fontWeight: 600, fontSize: '11px' }}
+              >
+                Insert Mapper Node
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Mapper Modal ──────────────────────────────────────────────────────────────
+
+function MapperModal({ sourceJson, destJson, existingMappings, onSave, onClose }: {
+  sourceJson: string
+  destJson: string
+  existingMappings: Array<{ from: string; to: string }>
+  onSave: (mappings: Array<{ from: string; to: string }>) => void
+  onClose: () => void
+}) {
+  const [mappings, setMappings] = useState<Array<{ from: string; to: string }>>(existingMappings)
+  const [dragOverDest, setDragOverDest] = useState<string | null>(null)
+  const dragKey = useRef<string>('')
+
+  const { sourceKeys, sourceValues: mapperSourceValues } = (() => {
+    try {
+      const parsed = JSON.parse(sourceJson)
+      const out: string[] = []
+      collectLeafPaths(parsed, '', 0, out)
+      return { sourceKeys: out.filter(p => p !== ''), sourceValues: buildValueMap(parsed) }
+    } catch { return { sourceKeys: [] as string[], sourceValues: {} as Record<string, unknown> } }
+  })()
+
+  const destKeys: string[] = (() => {
+    try {
+      const parsed = JSON.parse(destJson)
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        return Object.keys(parsed as Record<string, unknown>)
+      }
+      return []
+    } catch { return [] }
+  })()
+
+  const mappedSources = new Set(mappings.map(m => m.from))
+
+  const removeMapping = (idx: number) => {
+    setMappings(prev => prev.filter((_, i) => i !== idx))
+  }
+
+  const handleDrop = (destKey: string) => {
+    const fromKey = dragKey.current
+    if (!fromKey) return
+    setMappings(prev => {
+      // Remove existing mapping for this dest key, then add new one
+      const without = prev.filter(m => m.to !== destKey)
+      return [...without, { from: fromKey, to: destKey }]
+    })
+    setDragOverDest(null)
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000 }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '800px', maxHeight: '80vh', display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.4)', overflow: 'hidden' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', borderBottom: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <div style={{ fontWeight: 700, fontSize: '15px', color: '#2c3e50' }}>Field Mapper</div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#666', lineHeight: 1 }}>✕</button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
+          {/* Two columns */}
+          <div style={{ display: 'flex', gap: '20px', marginBottom: '16px' }}>
+            {/* Source fields */}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px' }}>
+                Source Fields <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag from here)</span>
+              </div>
+              {sourceKeys.length === 0 && (
+                <div style={{ fontSize: '11px', color: '#aaa', fontStyle: 'italic' }}>No source fields parsed — check your source JSON.</div>
+              )}
+              {sourceKeys.map(k => {
+                const isMapped = mappedSources.has(k)
+                return (
+                  <div
+                    key={k}
+                    draggable
+                    onDragStart={() => { dragKey.current = k }}
+                    onDragEnd={() => { dragKey.current = '' }}
+                    title={k in mapperSourceValues ? fmtVal(mapperSourceValues[k]) : undefined}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '4px',
+                      background: isMapped ? '#d4edda' : '#e8f4fd',
+                      border: `1px solid ${isMapped ? '#28a745' : '#3498db'}`,
+                      borderRadius: '4px', padding: '4px 8px', marginBottom: '6px', marginRight: '6px',
+                      fontFamily: 'monospace', fontSize: '11px', color: isMapped ? '#155724' : '#1a5276',
+                      cursor: 'grab', userSelect: 'none', opacity: isMapped ? 0.7 : 1,
+                    }}
+                  >
+                    {isMapped && <span style={{ fontSize: '10px' }}>✓</span>}
+                    {k}
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Destination fields */}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px' }}>
+                Destination Fields <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drop onto these)</span>
+              </div>
+              {destKeys.length === 0 && (
+                <div style={{ fontSize: '11px', color: '#aaa', fontStyle: 'italic' }}>No destination fields parsed — check your destination JSON.</div>
+              )}
+              {destKeys.map(dk => {
+                const existingMap = mappings.find(m => m.to === dk)
+                const isOver = dragOverDest === dk
+                return (
+                  <div
+                    key={dk}
+                    onDragOver={e => { e.preventDefault(); setDragOverDest(dk) }}
+                    onDragLeave={() => setDragOverDest(null)}
+                    onDrop={() => handleDrop(dk)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '8px',
+                      background: isOver ? '#d4edda' : existingMap ? '#f0fff4' : '#f5f5f5',
+                      border: `1px dashed ${isOver ? '#28a745' : existingMap ? '#90d0a0' : '#ccc'}`,
+                      borderRadius: '4px', padding: '5px 10px', marginBottom: '6px',
+                      transition: 'background 0.1s, border-color 0.1s',
+                      minHeight: '30px',
+                    }}
+                  >
+                    <code style={{ fontSize: '11px', color: '#2c3e50', flex: '0 0 auto' }}>{dk}</code>
+                    <span style={{ fontSize: '10px', color: '#aaa', flex: 1 }}>
+                      {existingMap
+                        ? <span style={{ color: '#27ae60', fontFamily: 'monospace' }}>← {existingMap.from}</span>
+                        : isOver ? <span style={{ color: '#27ae60' }}>drop here</span> : <span style={{ color: '#ccc' }}>drop here ▼</span>
+                      }
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+
+          {/* Current mappings */}
+          {mappings.length > 0 && (
+            <div style={{ borderTop: '1px solid #e0e6ed', paddingTop: '12px' }}>
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '8px' }}>
+                Current Mappings
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                {mappings.map((m, i) => (
+                  <div key={i} style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', background: '#f0f4ff', border: '1px solid #c5cff5', borderRadius: '4px', padding: '3px 8px', fontSize: '11px', fontFamily: 'monospace', color: '#2c3e50' }}>
+                    <span style={{ color: '#3498db' }}>{m.from}</span>
+                    <span style={{ color: '#aaa', fontSize: '10px' }}>→</span>
+                    <span style={{ color: '#27ae60' }}>{m.to}</span>
+                    <button onClick={() => removeMapping(i)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#e74c3c', fontSize: '12px', padding: '0 0 0 4px', lineHeight: 1 }}>✕</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', padding: '12px 20px', borderTop: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+            Cancel
+          </button>
+          <button
+            onClick={() => onSave(mappings)}
+            style={{ padding: '8px 16px', background: '#667eea', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}
+          >
+            Save Mappings
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── HTTP Body Builder Modal ───────────────────────────────────────────────────
+
+function setLeafValue(obj: Record<string, unknown>, path: string, value: unknown): Record<string, unknown> {
+  const segs = path.split('.')
+  const result = { ...obj }
+  let cur: Record<string, unknown> = result
+  for (let i = 0; i < segs.length - 1; i++) {
+    const seg = segs[i]
+    cur[seg] = typeof cur[seg] === 'object' && cur[seg] !== null && !Array.isArray(cur[seg])
+      ? { ...(cur[seg] as Record<string, unknown>) }
+      : {}
+    cur = cur[seg] as Record<string, unknown>
+  }
+  cur[segs[segs.length - 1]] = value
+  return result
+}
+
+function collectLeafPathsWithValues(obj: unknown, prefix: string, depth: number, out: Array<{ path: string; value: unknown }>): void {
+  if (depth > 5 || typeof obj !== 'object' || obj === null) {
+    out.push({ path: prefix, value: obj })
+    return
+  }
+  if (Array.isArray(obj)) {
+    (obj as unknown[]).forEach((item, i) => {
+      const childPath = prefix ? `${prefix}.${i}` : String(i)
+      if (typeof item === 'object' && item !== null && depth < 5) {
+        collectLeafPathsWithValues(item, childPath, depth + 1, out)
+      } else {
+        out.push({ path: childPath, value: item })
+      }
+    })
+    return
+  }
+  const keys = Object.keys(obj as Record<string, unknown>)
+  if (keys.length === 0) { out.push({ path: prefix, value: obj }); return }
+  for (const k of keys) {
+    const child = (obj as Record<string, unknown>)[k]
+    const childPath = prefix ? `${prefix}.${k}` : k
+    if (typeof child === 'object' && child !== null && depth < 5) {
+      collectLeafPathsWithValues(child, childPath, depth + 1, out)
+    } else {
+      out.push({ path: childPath, value: child })
+    }
+  }
+}
+
+// Build a path→value lookup from a parsed JSON object.
+function buildValueMap(parsed: unknown): Record<string, unknown> {
+  const out: Array<{ path: string; value: unknown }> = []
+  collectLeafPathsWithValues(parsed, '', 0, out)
+  const map: Record<string, unknown> = {}
+  for (const { path, value } of out) {
+    if (path) map[path] = value
+  }
+  return map
+}
+
+// Format a value for display in a tooltip.
+function fmtVal(v: unknown): string {
+  if (v === null) return 'null'
+  if (v === undefined) return ''
+  if (typeof v === 'string') return v
+  return JSON.stringify(v)
+}
+
+function HttpBodyBuilderModal({ existingBody, onSave, onClose }: {
+  existingBody: string
+  onSave: (body: string) => void
+  onClose: () => void
+}) {
+  const [sourceText, setSourceText] = useState('')
+  const [bodyText, setBodyText] = useState(existingBody)
+  const [sourcePaths, setSourcePaths] = useState<string[]>([])
+  const [sourceParseError, setSourceParseError] = useState('')
+  const [sourceFilter, setSourceFilter] = useState('')
+  const [bodyParseError, setBodyParseError] = useState('')
+  const [bodyObj, setBodyObj] = useState<Record<string, unknown>>(() => {
+    try { return JSON.parse(existingBody) || {} } catch { return {} }
+  })
+  const [bodyLeaves, setBodyLeaves] = useState<Array<{ path: string; value: unknown }>>([])
+  const [dragOverPath, setDragOverPath] = useState<string | null>(null)
+  const dragRef = useRef<string>('')
+
+  // Parse source JSON into leaf paths
+  const parseSource = () => {
+    setSourceParseError('')
+    setSourcePaths([])
+    let parsed: unknown
+    try { parsed = JSON.parse(sourceText) } catch { setSourceParseError('Invalid JSON.'); return }
+    const out: string[] = []
+    collectLeafPaths(parsed, '', 0, out)
+    setSourcePaths(out.filter(p => p !== ''))
+  }
+
+  // Sanitize body text for JSON parsing: replace unquoted {{...}} with 0
+  // and quoted "{{...}}" values are already valid strings — leave them.
+  const sanitizeBodyForParse = (text: string): string => {
+    // Replace unquoted {{...}} (not inside quotes) with placeholder number 0
+    return text.replace(/:\s*(\{\{[^}]+\}\})/g, ': "__PLACEHOLDER__$1"')
+  }
+
+  // Parse body textarea JSON into leaf rows — tolerates {{...}} placeholders
+  const parseBody = () => {
+    setBodyParseError('')
+    let parsed: Record<string, unknown>
+    const sanitized = sanitizeBodyForParse(bodyText)
+    try { parsed = JSON.parse(sanitized) } catch {
+      // Try original as fallback
+      try { parsed = JSON.parse(bodyText) } catch { setBodyParseError('Invalid JSON — check syntax.'); return }
+    }
+    // Restore placeholder values to original {{...}} form
+    const restore = (obj: unknown): unknown => {
+      if (typeof obj === 'string') return obj.replace(/^__PLACEHOLDER__/, '')
+      if (Array.isArray(obj)) return obj.map(restore)
+      if (obj && typeof obj === 'object') return Object.fromEntries(Object.entries(obj as Record<string, unknown>).map(([k, v]) => [k, restore(v)]))
+      return obj
+    }
+    parsed = restore(parsed) as Record<string, unknown>
+    setBodyObj(parsed)
+    const out: Array<{ path: string; value: unknown }> = []
+    collectLeafPathsWithValues(parsed, '', 0, out)
+    setBodyLeaves(out.filter(l => l.path !== ''))
+  }
+
+  // Sync bodyText into bodyObj when user types directly
+  const handleBodyTextChange = (text: string) => {
+    setBodyText(text)
+    try {
+      const sanitized = sanitizeBodyForParse(text)
+      const raw = JSON.parse(sanitized)
+      const restore = (obj: unknown): unknown => {
+        if (typeof obj === 'string') return obj.replace(/^__PLACEHOLDER__/, '')
+        if (Array.isArray(obj)) return obj.map(restore)
+        if (obj && typeof obj === 'object') return Object.fromEntries(Object.entries(obj as Record<string, unknown>).map(([k, v]) => [k, restore(v)]))
+        return obj
+      }
+      const parsed = restore(raw) as Record<string, unknown>
+      setBodyObj(parsed)
+      const out: Array<{ path: string; value: unknown }> = []
+      collectLeafPathsWithValues(parsed, '', 0, out)
+      setBodyLeaves(out.filter(l => l.path !== ''))
+      setBodyParseError('')
+    } catch { /* silent — user still typing */ }
+  }
+
+  const handleDrop = (leafPath: string) => {
+    const from = dragRef.current
+    if (!from) return
+    const updated = setLeafValue(bodyObj, leafPath, `{{${from}}}`)
+    setBodyObj(updated)
+    setBodyText(JSON.stringify(updated, null, 2))
+    const out: Array<{ path: string; value: unknown }> = []
+    collectLeafPathsWithValues(updated, '', 0, out)
+    setBodyLeaves(out.filter(l => l.path !== ''))
+    setDragOverPath(null)
+  }
+
+  const usedPaths = new Set(
+    bodyLeaves
+      .filter(l => typeof l.value === 'string' && (l.value as string).startsWith('{{'))
+      .map(l => {
+        const m = (l.value as string).match(/^\{\{(.+)\}\}$/)
+        return m ? m[1] : null
+      })
+      .filter(Boolean) as string[]
+  )
+
+  const previewJson = (() => {
+    try { return JSON.stringify(bodyObj, null, 2) } catch { return bodyText }
+  })()
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '900px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: '#1e293b', color: 'white' }}>
+          <div style={{ fontWeight: 700, fontSize: '15px' }}>HTTP Body Builder</div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#94a3b8', lineHeight: 1 }}>✕</button>
+        </div>
+
+        {/* Two-column body */}
+        <div style={{ flex: 1, overflow: 'auto', display: 'flex', gap: 0, minHeight: 0 }}>
+
+          {/* LEFT — Context Keys */}
+          <div style={{ flex: '0 0 300px', borderRight: '1px solid #e0e6ed', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Context Keys <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag from here)</span>
+            </div>
+            <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+              Paste sample JSON from the previous node output, then click Parse Keys.
+            </div>
+            <textarea
+              value={sourceText}
+              onChange={e => setSourceText(e.target.value)}
+              rows={6}
+              placeholder={'{\n  "results": [{"lat": 37.7, "lon": -122.4}],\n  "email_address": "user@example.com"\n}'}
+              spellCheck={false}
+              style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+            />
+            {sourceParseError && <div style={{ color: '#e74c3c', fontSize: '11px' }}>{sourceParseError}</div>}
+            <button
+              onClick={parseSource}
+              style={{ padding: '5px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}
+            >
+              Parse Keys
+            </button>
+
+            {sourcePaths.length > 0 && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', whiteSpace: 'nowrap' }}>SOURCE KEYS:</div>
+                  <input
+                    type="text"
+                    placeholder="filter..."
+                    value={sourceFilter}
+                    onChange={e => setSourceFilter(e.target.value)}
+                    style={{ flex: 1, fontSize: '10px', padding: '3px 6px', border: '1px solid #ddd', borderRadius: '4px', fontFamily: 'monospace', minWidth: 0 }}
+                  />
+                  {sourceFilter && (
+                    <button onClick={() => setSourceFilter('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#aaa', fontSize: '12px', padding: 0, lineHeight: 1 }}>✕</button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  {sourcePaths.filter(p => !sourceFilter || p.toLowerCase().includes(sourceFilter.toLowerCase())).map(p => {
+                    const isUsed = usedPaths.has(p)
+                    return (
+                      <div
+                        key={p}
+                        draggable
+                        onDragStart={() => { dragRef.current = p }}
+                        onDragEnd={() => { dragRef.current = '' }}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: '3px',
+                          background: isUsed ? '#d1fae5' : '#dbeafe',
+                          border: `1px solid ${isUsed ? '#34d399' : '#93c5fd'}`,
+                          borderRadius: '4px', padding: '3px 7px',
+                          fontFamily: 'monospace', fontSize: '10px',
+                          color: isUsed ? '#065f46' : '#1e40af',
+                          cursor: 'grab', userSelect: 'none', opacity: isUsed ? 0.75 : 1,
+                        }}
+                      >
+                        {isUsed && <span style={{ fontSize: '9px' }}>✓</span>}
+                        {p}
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* RIGHT — Request Body */}
+          <div style={{ flex: 1, padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Request Body <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drop onto values)</span>
+            </div>
+            <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+              Paste your desired body JSON structure, then click Parse Fields to get drop zones.
+            </div>
+            <textarea
+              value={bodyText}
+              onChange={e => handleBodyTextChange(e.target.value)}
+              rows={6}
+              placeholder={'{\n  "latitude": "",\n  "longitude": "",\n  "birth_time": ""\n}'}
+              spellCheck={false}
+              style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+            />
+            {bodyParseError && <div style={{ color: '#e74c3c', fontSize: '11px' }}>{bodyParseError}</div>}
+            <button
+              onClick={parseBody}
+              style={{ padding: '5px', background: '#6366f1', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}
+            >
+              Parse Fields
+            </button>
+
+            {bodyLeaves.length > 0 && (
+              <>
+                <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', marginTop: '4px' }}>BODY FIELDS:</div>
+                {bodyLeaves.map(leaf => {
+                  const isOver = dragOverPath === leaf.path
+                  const valStr = String(leaf.value ?? '')
+                  const isMapped = valStr.startsWith('{{') && valStr.endsWith('}}')
+                  return (
+                    <div
+                      key={leaf.path}
+                      onDragOver={e => { e.preventDefault(); setDragOverPath(leaf.path) }}
+                      onDragLeave={() => setDragOverPath(null)}
+                      onDrop={() => handleDrop(leaf.path)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '8px',
+                        background: isOver ? '#dcfce7' : isMapped ? '#f0fdf4' : '#f8fafc',
+                        border: `1px dashed ${isOver ? '#22c55e' : isMapped ? '#86efac' : '#cbd5e1'}`,
+                        borderRadius: '4px', padding: '5px 10px', transition: 'background 0.1s, border-color 0.1s',
+                        minHeight: '32px',
+                      }}
+                    >
+                      <code style={{ fontSize: '11px', color: '#334155', flex: '0 0 auto', minWidth: '100px' }}>{leaf.path}</code>
+                      <span style={{ flex: 1, fontSize: '11px', fontFamily: 'monospace' }}>
+                        {isMapped
+                          ? <span style={{ color: '#0d9488', fontWeight: 600 }}>{valStr}</span>
+                          : isOver
+                            ? <span style={{ color: '#16a34a' }}>drop here</span>
+                            : <span style={{ color: '#94a3b8' }}>{valStr || 'drop here ▼'}</span>
+                        }
+                      </span>
+                    </div>
+                  )
+                })}
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Preview */}
+        <div style={{ borderTop: '1px solid #e0e6ed', padding: '10px 20px', background: '#f8fafc', maxHeight: '120px', overflow: 'auto' }}>
+          <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>Preview</div>
+          <pre style={{ margin: 0, fontFamily: 'monospace', fontSize: '10px', color: '#334155', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{previewJson}</pre>
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', padding: '12px 20px', borderTop: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+            Cancel
+          </button>
+          <button
+            onClick={() => onSave(JSON.stringify(bodyObj, null, 2))}
+            style={{ padding: '8px 16px', background: '#6366f1', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}
+          >
+            Apply Body
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Node properties editor ────────────────────────────────────────────────────
 
-function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete, onTestFromHere }: {
+function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete, onTestFromHere, onInsertMapperNode, debugContext }: {
   node: BNode; isStart: boolean
   activities: ActivityInfo[]
   onSetStart: () => void
   onChange: (n: BNode) => void
   onDelete: () => void
   onTestFromHere: (nodeId: string) => void
+  onInsertMapperNode: (sourceNodeId: string, mappings: Array<{ from: string; to: string }>) => void
+  debugContext: string
 }) {
   const set = (patch: Partial<BNode>) => onChange({ ...node, ...patch })
   const setInput = (key: string, val: string) =>
     set({ staticInput: { ...(node.staticInput ?? {}), [key]: val } })
+
+  // Mapper-specific local UI state
+  const [mapperSourceJson, setMapperSourceJson] = useState('')
+  const [mapperDestJson, setMapperDestJson] = useState('')
+  const [showMapperModal, setShowMapperModal] = useState(false)
+
+  // HTTP Body Builder state
+  const [showHttpBodyBuilder, setShowHttpBodyBuilder] = useState(false)
+  const [showPbDataMapper, setShowPbDataMapper] = useState(false)
+  const [showPbQueryBuilder, setShowPbQueryBuilder] = useState(false)
+  const [showPbUpsertWhereBuilder, setShowPbUpsertWhereBuilder] = useState(false)
 
   if (node.activityName === 'END') {
     return (
@@ -306,6 +1738,20 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
   // Input fields that aren't wildcard (*) and aren't purely pass-through
   const inputFields = (actMeta?.meta.input_fields ?? []).filter(f => f.name !== '*')
   const isPython = node.activityName === 'python_eval'
+  const isPbWriteNode = node.activityName === 'pb_update' || node.activityName === 'pb_create' || node.activityName === 'pb_upsert' || node.activityName === 'pb_delete'
+  const isPbUpsert = node.activityName === 'pb_upsert'
+  const isPbQuery = node.activityName === 'pb_query'
+  const isHttpRequest = node.activityName === 'http_request'
+  const isMapper = node.activityName === 'mapper'
+
+  // Parse validity for mapper button enable
+  const mapperSourceValid = (() => { try { JSON.parse(mapperSourceJson); return mapperSourceJson.trim() !== ''; } catch { return false } })()
+  const mapperDestValid = (() => { try { JSON.parse(mapperDestJson); return mapperDestJson.trim() !== ''; } catch { return false } })()
+
+  // Parse existing mappings from staticInput for the modal
+  const existingMappings: Array<{ from: string; to: string }> = (() => {
+    try { return JSON.parse((node.staticInput ?? {}).mappings ?? '[]') } catch { return [] }
+  })()
 
   return (
     <div>
@@ -336,7 +1782,65 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
         />
       )}
 
-      {!isPython && inputFields.length > 0 && (
+      {isMapper && (
+        <>
+          <div style={{ marginTop: '14px', marginBottom: '6px', fontSize: '11px', fontWeight: 700, color: '#444', borderTop: '1px solid #e0e6ed', paddingTop: '10px' }}>
+            Field Mapper Config
+          </div>
+          <label style={labelStyle}>Source Data (paste sample JSON from previous node output)</label>
+          <textarea
+            value={mapperSourceJson}
+            onChange={e => setMapperSourceJson(e.target.value)}
+            rows={4}
+            placeholder={'{\n  "email_address": "user@example.com",\n  "first_name": "Jane"\n}'}
+            spellCheck={false}
+            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical', marginBottom: '6px' }}
+          />
+          <label style={labelStyle}>Destination Template (paste sample of what the output should look like)</label>
+          <textarea
+            value={mapperDestJson}
+            onChange={e => setMapperDestJson(e.target.value)}
+            rows={4}
+            placeholder={'{\n  "email": "",\n  "name": "",\n  "contact_id": ""\n}'}
+            spellCheck={false}
+            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical', marginBottom: '8px' }}
+          />
+          <button
+            onClick={() => setShowMapperModal(true)}
+            disabled={!mapperSourceValid || !mapperDestValid}
+            style={{
+              width: '100%', padding: '6px', background: (mapperSourceValid && mapperDestValid) ? '#667eea' : '#ccc',
+              color: 'white', border: 'none', borderRadius: '4px', cursor: (mapperSourceValid && mapperDestValid) ? 'pointer' : 'default',
+              fontWeight: 600, fontSize: '12px', marginBottom: '8px',
+            }}
+          >
+            Open Field Mapper
+          </button>
+          {(node.staticInput ?? {}).mappings && (
+            <div style={{ marginTop: '4px', fontSize: '10px', color: '#888' }}>
+              <div style={{ fontWeight: 600, marginBottom: '2px', color: '#555' }}>Current mappings:</div>
+              <code style={{ wordBreak: 'break-all', fontSize: '10px', background: '#f5f5f5', padding: '4px 6px', borderRadius: '3px', display: 'block', lineHeight: 1.6 }}>
+                {(node.staticInput ?? {}).mappings}
+              </code>
+            </div>
+          )}
+          {showMapperModal && (
+            <MapperModal
+              sourceJson={mapperSourceJson}
+              destJson={mapperDestJson}
+              existingMappings={existingMappings}
+              onSave={mappings => {
+                setInput('source_key', 'json')
+                setInput('mappings', JSON.stringify(mappings))
+                setShowMapperModal(false)
+              }}
+              onClose={() => setShowMapperModal(false)}
+            />
+          )}
+        </>
+      )}
+
+      {!isPython && !isMapper && !isPbQuery && inputFields.length > 0 && (
         <>
           <div style={{ marginTop: '14px', marginBottom: '6px', fontSize: '11px', fontWeight: 700, color: '#444', borderTop: '1px solid #e0e6ed', paddingTop: '10px' }}>
             Input Fields
@@ -349,9 +1853,32 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
               <label style={labelStyle}>
                 {f.name}
                 {f.type && <span style={{ color: '#aaa', fontWeight: 400 }}> ({f.type})</span>}
+                {isPbWriteNode && f.name === 'data' && (
+                  <span
+                    title={
+                      node.activityName === 'pb_update' ? 'Merge update: only listed fields change; omitted fields are untouched.' :
+                      node.activityName === 'pb_upsert' ? 'Upsert: updates if id supplied, creates otherwise.' :
+                      'Create: all listed fields are set on the new record.'
+                    }
+                    style={{ marginLeft: '4px', color: '#6b46c1', cursor: 'help', fontSize: '12px' }}
+                  >ℹ</span>
+                )}
               </label>
               {f.description && (
                 <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>{f.description}</div>
+              )}
+              {isHttpRequest && f.name === 'body' && (
+                <button
+                  onClick={() => setShowHttpBodyBuilder(true)}
+                  style={{
+                    display: 'block', width: '100%', marginBottom: '4px',
+                    padding: '5px 10px', background: '#6366f1', color: 'white',
+                    border: 'none', borderRadius: '4px', cursor: 'pointer',
+                    fontWeight: 600, fontSize: '11px', textAlign: 'left',
+                  }}
+                >
+                  Build Body
+                </button>
               )}
               <input
                 value={(node.staticInput ?? {})[f.name] ?? ''}
@@ -361,6 +1888,191 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
               />
             </div>
           ))}
+        </>
+      )}
+
+      {isPbWriteNode && (
+        <>
+          <button
+            onClick={() => setShowPbDataMapper(true)}
+            style={{
+              display: 'block', width: '100%', marginTop: '10px',
+              padding: '6px 10px', background: '#6b46c1', color: 'white',
+              border: 'none', borderRadius: '4px', cursor: 'pointer',
+              fontWeight: 600, fontSize: '11px', textAlign: 'left',
+            }}
+          >
+            Open Field Mapper
+          </button>
+          {showPbDataMapper && (
+            <PbDataMapperModal
+              existingData={(node.staticInput ?? {}).data ?? ''}
+              existingId={(node.staticInput ?? {}).id ?? ''}
+              existingResultKey={(node.staticInput ?? {}).result_key ?? ''}
+              defaultSourceJson={debugContext}
+              tableName={(node.staticInput ?? {}).table_name ?? ''}
+              mode={
+                node.activityName === 'pb_update' ? 'update' :
+                node.activityName === 'pb_upsert' ? 'upsert' :
+                node.activityName === 'pb_delete' ? 'delete' : 'create'
+              }
+              onSave={data => setInput('data', data)}
+              onSaveId={id => setInput('id', id)}
+              onSaveResultKey={key => setInput('result_key', key)}
+              onClose={() => setShowPbDataMapper(false)}
+            />
+          )}
+        </>
+      )}
+
+      {isPbUpsert && (
+        <>
+          <button
+            onClick={() => setShowPbUpsertWhereBuilder(true)}
+            style={{
+              display: 'block', width: '100%', marginTop: '10px',
+              padding: '6px 10px', background: '#0369a1', color: 'white',
+              border: 'none', borderRadius: '4px', cursor: 'pointer',
+              fontWeight: 600, fontSize: '11px', textAlign: 'left',
+            }}
+          >
+            {(() => {
+              const si = node.staticInput ?? {}
+              try {
+                const f = JSON.parse(si.where_filters ?? '[]') as Array<{field:string;operator:string;value:string}>
+                if (f.length > 0) return `Update Where (${f.length} rule${f.length > 1 ? 's' : ''})`
+              } catch { /* ignore */ }
+              return 'Update Where (optional)'
+            })()}
+          </button>
+          {(() => {
+            const si = node.staticInput ?? {}
+            let existingFilters: QueryFilter[] = []
+            try { existingFilters = (JSON.parse(si.where_filters ?? '[]') as Array<{field:string;operator:string;value:string}>).map(f => ({ ...f, id: qid() })) } catch { /* ignore */ }
+            const existing: QueryConfig = {
+              tableName: si.table_name ?? '',
+              resultKey: '',
+              filters: existingFilters,
+              filterMode: (si.where_filter_mode as 'and' | 'or') || 'and',
+              sortField: '',
+              sortDir: 'asc',
+              limit: 1,
+            }
+            return showPbUpsertWhereBuilder ? (
+              <PbQueryBuilderModal
+                existing={existing}
+                defaultSourceJson={debugContext}
+                onSave={cfg => {
+                  const filters = cfg.filters.filter(f => f.field && f.operator)
+                  const next = { ...(node.staticInput ?? {}), where_filters: JSON.stringify(filters.map(({ field, operator, value }) => ({ field, operator, value }))), where_filter_mode: cfg.filterMode }
+                  onChange({ ...node, staticInput: next })
+                  setShowPbUpsertWhereBuilder(false)
+                }}
+                onClose={() => setShowPbUpsertWhereBuilder(false)}
+              />
+            ) : null
+          })()}
+        </>
+      )}
+
+      {isPbQuery && (
+        <>
+          <button
+            onClick={() => setShowPbQueryBuilder(true)}
+            style={{
+              display: 'block', width: '100%', marginTop: '10px',
+              padding: '6px 10px', background: '#0ea5e9', color: 'white',
+              border: 'none', borderRadius: '4px', cursor: 'pointer',
+              fontWeight: 600, fontSize: '11px', textAlign: 'left',
+            }}
+          >
+            Open Query Builder
+          </button>
+          {/* Summary of current query config */}
+          {(node.staticInput ?? {}).table_name && (
+            <div style={{ marginTop: '6px', fontSize: '11px', color: '#555', background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: '4px', padding: '6px 10px' }}>
+              <strong>{(node.staticInput ?? {}).table_name}</strong>
+              {(node.staticInput ?? {}).filters && (() => {
+                try {
+                  const fs = JSON.parse((node.staticInput ?? {}).filters)
+                  return <span style={{ color: '#0284c7' }}> · {fs.length} filter{fs.length !== 1 ? 's' : ''} ({(node.staticInput ?? {}).filter_mode ?? 'and'})</span>
+                } catch { return null }
+              })()}
+              {(node.staticInput ?? {}).sort_field && <span style={{ color: '#0284c7' }}> · sort: {(node.staticInput ?? {}).sort_field} {(node.staticInput ?? {}).sort_dir ?? 'asc'}</span>}
+              {(node.staticInput ?? {}).limit && <span style={{ color: '#0284c7' }}> · limit {(node.staticInput ?? {}).limit}</span>}
+              {(node.staticInput ?? {}).result_key && <span style={{ color: '#7c3aed' }}> → {(node.staticInput ?? {}).result_key}.*</span>}
+            </div>
+          )}
+          {showPbQueryBuilder && (() => {
+            const si = node.staticInput ?? {}
+            let existingFilters: QueryFilter[] = []
+            try { existingFilters = (JSON.parse(si.filters ?? '[]') as Array<{field:string;operator:string;value:string}>).map(f => ({ ...f, id: qid() })) } catch { /* ignore */ }
+            const existing: QueryConfig = {
+              tableName: si.table_name ?? '',
+              resultKey: si.result_key ?? '',
+              filters: existingFilters,
+              filterMode: (si.filter_mode as 'and' | 'or') ?? 'and',
+              sortField: si.sort_field ?? '',
+              sortDir: (si.sort_dir as 'asc' | 'desc') ?? 'asc',
+              limit: Number(si.limit) || 50,
+            }
+            return (
+              <PbQueryBuilderModal
+                existing={existing}
+                defaultSourceJson={debugContext}
+                onSave={cfg => {
+                  onChange({
+                    ...node,
+                    staticInput: {
+                      ...(node.staticInput ?? {}),
+                      table_name: cfg.tableName,
+                      result_key: cfg.resultKey,
+                      filters: JSON.stringify(cfg.filters.map(({ id: _id, ...rest }) => rest)),
+                      filter_mode: cfg.filterMode,
+                      sort_field: cfg.sortField,
+                      sort_dir: cfg.sortDir,
+                      limit: String(cfg.limit),
+                    },
+                  })
+                  setShowPbQueryBuilder(false)
+                }}
+                onClose={() => setShowPbQueryBuilder(false)}
+              />
+            )
+          })()}
+        </>
+      )}
+
+      {isHttpRequest && (
+        <HttpResponseMapperPanel
+          node={node}
+          onInsertMapperNode={onInsertMapperNode}
+        />
+      )}
+
+      {isHttpRequest && showHttpBodyBuilder && (
+        <HttpBodyBuilderModal
+          existingBody={(node.staticInput ?? {}).body ?? ''}
+          onSave={body => {
+            setInput('body', body)
+            setShowHttpBodyBuilder(false)
+          }}
+          onClose={() => setShowHttpBodyBuilder(false)}
+        />
+      )}
+
+      {(isPbWriteNode || isPbQuery) && (
+        <>
+          <label style={{ ...labelStyle, marginTop: '10px' }}>
+            Result Key
+            <span title="Store output under this context key (e.g. &quot;contact&quot; → {{contact.id}}). Useful when multiple PB nodes share similar output keys." style={{ marginLeft: '4px', color: '#6b46c1', cursor: 'help' }}>ℹ</span>
+          </label>
+          <input
+            value={(node.staticInput ?? {}).result_key ?? ''}
+            onChange={e => setInput('result_key', e.target.value)}
+            style={inputStyle}
+            placeholder={isPbQuery ? 'e.g. contacts' : 'e.g. contact'}
+          />
         </>
       )}
 
@@ -443,18 +2155,81 @@ export default function WorkflowBuilder() {
   const svgRef = useRef<SVGSVGElement>(null)
 
   const [activities, setActivities] = useState<ActivityInfo[]>([])
+  const [openCategory, setOpenCategory] = useState<string | null>(null)
   const [nodes, setNodes] = useState<BNode[]>([])
   const [edges, setEdges] = useState<BEdge[]>([])
   const [startNode, setStartNode] = useState<string | null>(null)
   const [selectedNode, setSelectedNode] = useState<string | null>(null)
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null)
-  const [connecting, setConnecting] = useState<string | null>(null)  // fromNodeId
   const [draggingNode, setDraggingNode] = useState<string | null>(null)
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
+  // Drag-to-connect state
+  const dragConnectFrom = useRef<string | null>(null)
+  const [dragConnectLine, setDragConnectLine] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null)
+  const [connectHover, setConnectHover] = useState<string | null>(null)
   const [graphName, setGraphName] = useState('my_workflow')
   const [saveStatus, setSaveStatus] = useState<string>('')
   const [testModal, setTestModal] = useState<string | null>(null)  // nodeId being tested
   const [graphNotFound, setGraphNotFound] = useState<string>('')
+
+  // ── Debug panel state ──────────────────────────────────────────────────────
+  const [debugOpen, setDebugOpen] = useState(false)
+  const [debugHeight, setDebugHeight] = useState(300)
+  const [debugContext, setDebugContext] = useState('{}')
+  const [debugNodeIdx, setDebugNodeIdx] = useState(0)
+  const [debugResults, setDebugResults] = useState<Array<{nodeId: string; activityName: string; output?: unknown; error?: string}>>([])
+  const [debugRunning, setDebugRunning] = useState(false)
+  const [debugResetKey, setDebugResetKey] = useState(0)
+  const [debugCopied, setDebugCopied] = useState(false)
+
+  // ── Loop-aware context enrichment ─────────────────────────────────────────
+  // Inject item: arr[0] into context when a node is inside a loop body.
+  const enrichContextForNode = useCallback((ctx: string, nodeId: string): string => {
+    for (const loopNode of nodes.filter(n => n.activityName === 'loop')) {
+      const reachable = new Set<string>()
+      const q = edges.filter(e => e.fromNode === loopNode.id).map(e => e.toNode)
+      while (q.length > 0) {
+        const id = q.shift()!
+        if (reachable.has(id) || id === loopNode.id) continue
+        reachable.add(id)
+        const n = nodes.find(n => n.id === id)
+        if (!n || n.activityName === 'loop_next') continue
+        for (const e of edges.filter(e => e.fromNode === id)) q.push(e.toNode)
+      }
+      if (reachable.has(nodeId)) {
+        const listKey = loopNode.staticInput?.list_key || 'records'
+        const itemKey = loopNode.staticInput?.item_key || 'item'
+        try {
+          const ctxObj = JSON.parse(ctx) as Record<string, unknown>
+          // Support dotted paths like "records.records"
+          let raw: unknown = ctxObj
+          for (const part of listKey.split('.')) {
+            raw = (raw as Record<string, unknown>)?.[part]
+          }
+          const arr = Array.isArray(raw) ? raw : null
+          if (arr && arr.length > 0) {
+            return JSON.stringify({ ...ctxObj, [itemKey]: arr[0] }, null, 2)
+          }
+        } catch { /* ignore */ }
+      }
+    }
+    return ctx
+  }, [nodes, edges])
+
+  const enrichedDebugContext = useMemo(() => {
+    if (!selectedNode) return debugContext
+    return enrichContextForNode(debugContext, selectedNode)
+  }, [debugContext, selectedNode, enrichContextForNode])
+
+  const onDebugResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = debugHeight
+    const onMove = (ev: MouseEvent) => setDebugHeight(Math.max(150, Math.min(window.innerHeight - 200, startH - (ev.clientY - startY))))
+    const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
 
   // Drag from sidebar
   const dragActivity = useRef<string | null>(null)
@@ -481,22 +2256,37 @@ export default function WorkflowBuilder() {
         }
         setGraphNotFound('')
         setGraphName(g.name)
-        // Lay out nodes in a grid since we don't store positions
-        const nodeEntries = Object.values(g.nodes) as Array<{
-          id: string; activity_name: string; max_retries: number; is_human: boolean
-          needs_conversion?: boolean; input?: Record<string, string>; transitions: Array<{ next_node: string; conditions: unknown[]; label?: string }>
-        }>
+        // Walk nodes in execution order (BFS from start_node) so left-to-right layout matches firing order
+        type RawNode = { id: string; activity_name: string; label?: string; max_retries: number; is_human: boolean; needs_conversion?: boolean; input?: Record<string, string>; transitions: Array<{ next_node: string; conditions: unknown[]; label?: string }> }
+        const nodeMap = g.nodes as Record<string, RawNode>
+        const ordered: RawNode[] = []
+        const visited = new Set<string>()
+        const queue: string[] = [g.start_node]
+        while (queue.length > 0) {
+          const id = queue.shift()!
+          if (visited.has(id) || !nodeMap[id]) continue
+          visited.add(id)
+          ordered.push(nodeMap[id])
+          for (const t of nodeMap[id].transitions ?? []) {
+            if (t.next_node && !visited.has(t.next_node)) queue.push(t.next_node)
+          }
+        }
+        // Any nodes not reachable from start (disconnected) go at the end
+        for (const n of Object.values(nodeMap) as RawNode[]) {
+          if (!visited.has(n.id)) ordered.push(n)
+        }
         let col = 0, row = 0
-        const loadedNodes: BNode[] = nodeEntries.map(n => {
+        const loadedNodes: BNode[] = ordered.map(n => {
           const x = 80 + col * 220; const y = 100 + row * 120
-          col++; if (col > 3) { col = 0; row++ }
+          col++; if (col > 4) { col = 0; row++ }
           return {
             id: n.id, activityName: n.activity_name,
-            x, y, label: '', maxRetries: n.max_retries ?? 0,
+            x, y, label: n.label ?? '', maxRetries: n.max_retries ?? 0,
             isHuman: n.is_human ?? false, needsConversion: n.needs_conversion ?? false,
             staticInput: (n.input ?? {}) as Record<string, string>,
           }
         })
+        const nodeEntries = ordered
         const loadedEdges: BEdge[] = []
         for (const n of nodeEntries) {
           for (const t of n.transitions ?? []) {
@@ -531,16 +2321,15 @@ export default function WorkflowBuilder() {
     dragActivity.current = null
 
     const id = newNid()
-    const isHumanDrop = name === '__human__'
-    const isPythonDrop = name === '__python__'
-    const activityName = isHumanDrop ? 'human_input' : isPythonDrop ? 'python_eval' : name
+    const activityName = name === '__human__' ? 'human_input' : name === '__python__' ? 'python_eval' : name
+    const isHumanNode = activityName === 'human_input' || activityName === 'python_eval'
     const defaultStaticInput: Record<string, string> =
-      isPythonDrop ? { code: 'print("input was:", input)\nresult = {"doubled": input.get("value", 0) * 2, "msg": "hello from pyodide"}' }
+      activityName === 'python_eval' ? { code: 'print("input was:", input)\nresult = {"doubled": input.get("value", 0) * 2, "msg": "hello from pyodide"}' }
       : activityName === 'loop' ? { list_key: 'records', item_key: 'item' }
       : {}
     const node: BNode = {
       id, activityName, x: x - NODE_W / 2, y: y - NODE_H / 2,
-      label: '', maxRetries: 0, isHuman: isHumanDrop || isPythonDrop, needsConversion: false, staticInput: defaultStaticInput,
+      label: '', maxRetries: 0, isHuman: isHumanNode, needsConversion: false, staticInput: defaultStaticInput,
     }
     setNodes(prev => {
       const next = [...prev, node]
@@ -555,7 +2344,7 @@ export default function WorkflowBuilder() {
   // ── Node dragging (move on canvas) ────────────────────────────────────────
 
   const onNodeMouseDown = (e: React.MouseEvent, nodeId: string) => {
-    if (connecting) return // don't drag while connecting
+    if (dragConnectFrom.current) return // don't drag while connecting
     e.stopPropagation()
     const node = nodes.find(n => n.id === nodeId)!
     const { x, y } = svgCoords(e.clientX, e.clientY)
@@ -566,39 +2355,53 @@ export default function WorkflowBuilder() {
   }
 
   const onSvgMouseMove = (e: React.MouseEvent) => {
-    if (!draggingNode) return
     const { x, y } = svgCoords(e.clientX, e.clientY)
-    setNodes(prev => prev.map(n =>
-      n.id === draggingNode ? { ...n, x: x - dragOffset.x, y: y - dragOffset.y } : n
-    ))
-  }
-
-  const onSvgMouseUp = () => {
-    setDraggingNode(null)
-  }
-
-  // ── Port click (connect nodes) ────────────────────────────────────────────
-
-  const onOutputPortClick = (e: React.MouseEvent, nodeId: string) => {
-    e.stopPropagation()
-    if (nodeId === connecting) { setConnecting(null); return }
-    if (connecting) {
-      // Complete edge: connecting → nodeId
-      createEdge(connecting, nodeId)
-      setConnecting(null)
-    } else {
-      setConnecting(nodeId)
-      setSelectedNode(null)
-      setSelectedEdge(null)
+    if (draggingNode) {
+      setNodes(prev => prev.map(n =>
+        n.id === draggingNode ? { ...n, x: x - dragOffset.x, y: y - dragOffset.y } : n
+      ))
+    }
+    if (dragConnectFrom.current) {
+      // Find source port position
+      const src = nodes.find(n => n.id === dragConnectFrom.current)
+      if (src) {
+        setDragConnectLine({ x1: src.x + NODE_W + PORT_R, y1: src.y + NODE_H / 2, x2: x, y2: y })
+        // Check if hovering over a valid target node
+        const target = nodes.find(n =>
+          n.id !== dragConnectFrom.current &&
+          x >= n.x && x <= n.x + NODE_W && y >= n.y && y <= n.y + NODE_H
+        )
+        setConnectHover(target?.id ?? null)
+      }
     }
   }
 
-  const onInputPortClick = (e: React.MouseEvent, nodeId: string) => {
+  const onSvgMouseUp = (e: React.MouseEvent) => {
+    if (dragConnectFrom.current) {
+      const { x, y } = svgCoords(e.clientX, e.clientY)
+      const target = nodes.find(n =>
+        n.id !== dragConnectFrom.current &&
+        x >= n.x && x <= n.x + NODE_W && y >= n.y && y <= n.y + NODE_H
+      )
+      if (target) createEdge(dragConnectFrom.current, target.id)
+      dragConnectFrom.current = null
+      setDragConnectLine(null)
+      setConnectHover(null)
+    }
+    setDraggingNode(null)
+  }
+
+  // ── Drag-to-connect: start on output port mousedown ───────────────────────
+
+  const onOutputPortMouseDown = (e: React.MouseEvent, nodeId: string) => {
     e.stopPropagation()
-    if (!connecting) return
-    if (connecting === nodeId) { setConnecting(null); return }
-    createEdge(connecting, nodeId)
-    setConnecting(null)
+    e.preventDefault()
+    dragConnectFrom.current = nodeId
+    const src = nodes.find(n => n.id === nodeId)!
+    const { x, y } = svgCoords(e.clientX, e.clientY)
+    setDragConnectLine({ x1: src.x + NODE_W + PORT_R, y1: src.y + NODE_H / 2, x2: x, y2: y })
+    setSelectedNode(null)
+    setSelectedEdge(null)
   }
 
   const createEdge = (fromNode: string, toNode: string) => {
@@ -612,7 +2415,6 @@ export default function WorkflowBuilder() {
   // ── Canvas click (deselect) ───────────────────────────────────────────────
 
   const onSvgClick = () => {
-    if (connecting) { setConnecting(null); return }
     setSelectedNode(null)
     setSelectedEdge(null)
   }
@@ -639,6 +2441,10 @@ export default function WorkflowBuilder() {
           : e.toNode,
         label: e.label || undefined,
       }))
+      // Loop nodes require a "body" label on the first transition
+      if (n.activityName === 'loop' && transitions.length > 0 && !transitions.some(t => t.label === 'body')) {
+        transitions[0] = { ...transitions[0], label: 'body' }
+      }
       const si = n.staticInput ?? {}
       const inputPayload = n.activityName === 'python_eval'
         ? { code: si.code ?? '' }
@@ -649,6 +2455,7 @@ export default function WorkflowBuilder() {
         max_retries: n.maxRetries,
         transitions,
         is_human: n.isHuman,
+        ...(n.label ? { label: n.label } : {}),
         ...(n.needsConversion ? { needs_conversion: true } : {}),
         ...(inputPayload !== undefined ? { input: inputPayload } : {}),
       }
@@ -670,6 +2477,197 @@ export default function WorkflowBuilder() {
       return false
     }
   }
+
+  // ── Insert mapper node after http_request ─────────────────────────────────
+
+  const insertMapperNode = useCallback((sourceNodeId: string, mappings: Array<{ from: string; to: string }>) => {
+    const sourceNode = nodes.find(n => n.id === sourceNodeId)
+    if (!sourceNode) return
+
+    const mapperId = newNid()
+    // Build staticInput: mappings is an array; we store as JSON in a "mappings" key
+    const mappingsPayload = mappings.map(m => ({ from: m.from, to: m.to }))
+    const mapperNode: BNode = {
+      id: mapperId,
+      activityName: 'mapper',
+      x: sourceNode.x + 220,
+      y: sourceNode.y,
+      label: 'mapper',
+      maxRetries: 0,
+      isHuman: false,
+      needsConversion: false,
+      staticInput: { mappings: JSON.stringify(mappingsPayload) },
+    }
+
+    // Find existing outbound edges from sourceNode and redirect them to come from mapperNode
+    setEdges(prev => {
+      const outboundEdges = prev.filter(e => e.fromNode === sourceNodeId)
+      const otherEdges = prev.filter(e => e.fromNode !== sourceNodeId)
+      // Re-wire existing outbound edges to go from mapperNode instead
+      const rewiredEdges = outboundEdges.map(e => ({ ...e, id: newEid(), fromNode: mapperId }))
+      // New edge: sourceNode → mapperNode
+      const newEdge: BEdge = { id: newEid(), fromNode: sourceNodeId, toNode: mapperId, conditions: [], label: '' }
+      return [...otherEdges, newEdge, ...rewiredEdges]
+    })
+
+    setNodes(prev => [...prev, mapperNode])
+    setSelectedNode(mapperId)
+  }, [nodes])
+
+  // ── Debug: ordered node walk from startNode ───────────────────────────────
+
+  const debugNodes = useMemo(() => {
+    if (!startNode || nodes.length === 0) return []
+    const ordered: BNode[] = []
+    const visited = new Set<string>()
+    let cur = nodes.find(n => n.id === startNode)
+    while (cur && !visited.has(cur.id) && cur.activityName !== 'END') {
+      visited.add(cur.id)
+      ordered.push(cur)
+      const edge = edges.find(e => e.fromNode === cur!.id)
+      if (!edge) break
+      cur = nodes.find(n => n.id === edge.toNode)
+    }
+    return ordered
+  }, [nodes, edges, startNode])
+
+  // ── Template resolver (type-preserving) ───────────────────────────────────
+  // Walks a value recursively. When a string is exactly "{{path}}", it returns
+  // the resolved value at that path (preserving type — array, object, etc.).
+  // When a string contains templates mixed with other text, string-interpolates.
+  function resolveTemplates(val: unknown, ctx: Record<string, unknown>): unknown {
+    if (typeof val === 'string') {
+      const full = val.match(/^\{\{([\w.]+)\}\}$/)
+      if (full) {
+        const parts = full[1].split('.')
+        let cur: unknown = ctx
+        for (const p of parts) cur = (cur as Record<string, unknown>)?.[p]
+        return cur ?? ''
+      }
+      return val.replace(/\{\{([\w.]+)\}\}/g, (_, path) => {
+        const parts = path.split('.')
+        let cur: unknown = ctx
+        for (const p of parts) cur = (cur as Record<string, unknown>)?.[p]
+        return cur != null ? (typeof cur === 'object' ? JSON.stringify(cur) : String(cur)) : ''
+      })
+    }
+    if (Array.isArray(val)) return val.map(v => resolveTemplates(v, ctx))
+    if (val && typeof val === 'object') {
+      const result: Record<string, unknown> = {}
+      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+        result[k] = resolveTemplates(v, ctx)
+      }
+      return result
+    }
+    return val
+  }
+
+  // ── Debug: step one node ──────────────────────────────────────────────────
+
+  const debugStep = useCallback(async () => {
+    const node = debugNodes[debugNodeIdx]
+    if (!node) return
+
+    setDebugRunning(true)
+    let input: Record<string, unknown> = {}
+    try { input = JSON.parse(enrichContextForNode(debugContext, node.id)) } catch { /* keep empty */ }
+
+    const mergedInput: Record<string, unknown> = { ...input }
+    for (const [k, v] of Object.entries(node.staticInput ?? {})) {
+      let parsed: unknown = v
+      if (typeof v === 'string') { try { parsed = JSON.parse(v) } catch { /* keep */ } }
+      mergedInput[k] = resolveTemplates(parsed, input)
+    }
+
+    let data: { output?: unknown; error?: string } = {}
+    try {
+      const resp = await fetch('/api/workflows/execute-node', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ activity: node.activityName, input: mergedInput }),
+      })
+      const ct = resp.headers.get('content-type') ?? ''
+      if (!ct.includes('application/json')) {
+        data = { error: `Session expired — please refresh the page and log in again (got ${resp.status})` }
+      } else {
+        data = await resp.json()
+      }
+    } catch (e) {
+      data = { error: String(e) }
+    }
+
+    let mergedCtx = { ...input }
+    if (!data.error && data.output && typeof data.output === 'object') {
+      mergedCtx = { ...mergedCtx, ...(data.output as Record<string, unknown>) }
+    }
+    setDebugResults(prev => [...prev, { nodeId: node.id, activityName: node.activityName, output: mergedCtx, error: data.error }])
+
+    if (!data.error) {
+      try {
+        setDebugContext(JSON.stringify(mergedCtx, null, 2))
+      } catch { /* keep as-is */ }
+    }
+
+    setDebugNodeIdx(i => i + 1)
+    setDebugRunning(false)
+  }, [debugNodeIdx, debugContext, debugNodes, enrichContextForNode])
+
+  // ── Debug: run all remaining nodes ────────────────────────────────────────
+
+  const debugRunAll = useCallback(async () => {
+    let idx = debugNodeIdx
+    let ctx = debugContext
+    let results = [...debugResults]
+    for (let i = idx; i < debugNodes.length; i++) {
+      setDebugRunning(true)
+      const node = debugNodes[i]
+      if (!node) break
+
+      let input: Record<string, unknown> = {}
+      try { input = JSON.parse(enrichContextForNode(ctx, node.id)) } catch { /* keep empty */ }
+
+      const mergedInput: Record<string, unknown> = { ...input }
+      for (const [k, v] of Object.entries(node.staticInput ?? {})) {
+        let parsed: unknown = v
+        if (typeof v === 'string') { try { parsed = JSON.parse(v) } catch { /* keep */ } }
+        mergedInput[k] = resolveTemplates(parsed, input)
+      }
+
+      let data: { output?: unknown; error?: string } = {}
+      try {
+        const resp = await fetch('/api/workflows/execute-node', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ activity: node.activityName, input: mergedInput }),
+        })
+        const ct = resp.headers.get('content-type') ?? ''
+        if (!ct.includes('application/json')) {
+          data = { error: `Session expired — please refresh the page and log in again (got ${resp.status})` }
+        } else {
+          data = await resp.json()
+        }
+      } catch (e) {
+        data = { error: String(e) }
+      }
+
+      let mergedCtxObj = { ...input }
+      if (!data.error && data.output && typeof data.output === 'object') {
+        mergedCtxObj = { ...mergedCtxObj, ...(data.output as Record<string, unknown>) }
+        try { ctx = JSON.stringify(mergedCtxObj, null, 2) } catch { /* keep */ }
+      }
+
+      results = [...results, { nodeId: node.id, activityName: node.activityName, output: mergedCtxObj, error: data.error }]
+      idx = i + 1
+
+      setDebugResults(results)
+      setDebugContext(ctx)
+      setDebugNodeIdx(idx)
+
+      if (data.error) break
+      await new Promise(r => setTimeout(r, 300))
+    }
+    setDebugRunning(false)
+  }, [debugNodeIdx, debugContext, debugResults, debugNodes, enrichContextForNode])
 
   // ── Test from node ────────────────────────────────────────────────────────
 
@@ -699,6 +2697,12 @@ export default function WorkflowBuilder() {
   const selNode = selectedNode ? nodes.find(n => n.id === selectedNode) : null
   const selEdge = selectedEdge ? edges.find(e => e.id === selectedEdge) : null
 
+  // Debug ring lookup sets
+  const debugCurrentNodeId = debugOpen && debugNodes[debugNodeIdx]?.id
+  const debugCompletedIds = new Set(debugResults.filter(r => !r.error).map(r => r.nodeId))
+  const debugFailedIds = new Set(debugResults.filter(r => !!r.error).map(r => r.nodeId))
+  const lastDebugResult = debugResults[debugResults.length - 1]
+
   const svgW = Math.max(800, ...nodes.map(n => n.x + NODE_W + 100))
   const svgH = Math.max(600, ...nodes.map(n => n.y + NODE_H + 100))
 
@@ -727,6 +2731,12 @@ export default function WorkflowBuilder() {
         <input value={graphName} onChange={e => setGraphName(e.target.value)}
           style={{ fontFamily: 'monospace', padding: '5px 8px', border: '1px solid #e0e6ed', borderRadius: '4px', fontSize: '13px', width: '180px' }} />
         <button onClick={saveGraph} style={hBtn('#27ae60')}>Save Graph</button>
+        <button
+          onClick={() => setDebugOpen(o => !o)}
+          style={{ ...hBtn(debugOpen ? '#5a3ea0' : '#7c5cbf'), outline: debugOpen ? '2px solid #b39ddb' : 'none', outlineOffset: '2px' }}
+        >
+          ▶ Debug
+        </button>
         {saveStatus && <span style={{ fontSize: '12px', color: saveStatus.startsWith('Error') ? '#e74c3c' : '#27ae60', fontWeight: 600 }}>{saveStatus}</span>}
       </header>
 
@@ -739,13 +2749,13 @@ export default function WorkflowBuilder() {
           </div>
           <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '10px' }}>Drag onto canvas</div>
 
-          {/* END / Finish node */}
+          {/* END / Finish node — always pinned, not in API */}
           <div
             draggable
             onDragStart={() => { dragActivity.current = 'END' }}
             style={{
               background: '#fff0f0', border: '1px solid #f9c0c0', borderRadius: '6px',
-              padding: '8px 10px', cursor: 'grab', marginBottom: '6px',
+              padding: '8px 10px', cursor: 'grab', marginBottom: '10px',
               fontSize: '12px', fontFamily: 'monospace', color: '#c0392b',
               fontWeight: 700, userSelect: 'none',
             }}
@@ -753,113 +2763,37 @@ export default function WorkflowBuilder() {
             ⏹ END (Finish)
           </div>
 
-          {/* Human Input node */}
-          <div
-            draggable
-            onDragStart={() => { dragActivity.current = '__human__' }}
-            style={{
-              background: '#fffbf0', border: '1px solid #f9e0a0', borderRadius: '6px',
-              padding: '8px 10px', cursor: 'grab', marginBottom: '6px',
-              fontSize: '12px', fontFamily: 'monospace', color: '#b7770d',
-              fontWeight: 700, userSelect: 'none',
-            }}
-          >
-            👤 Human Input
-            <div style={{ fontSize: '10px', fontFamily: 'sans-serif', fontWeight: 400, color: '#a08030', marginTop: '2px' }}>
-              Pauses for human approval
-            </div>
-          </div>
-
-          {/* Python Script node */}
-          <div
-            draggable
-            onDragStart={() => { dragActivity.current = '__python__' }}
-            style={{
-              background: '#f0f0ff', border: '1px solid #3572A5', borderRadius: '6px',
-              padding: '8px 10px', cursor: 'grab', marginBottom: '6px',
-              fontSize: '12px', fontFamily: 'monospace', color: '#3572A5',
-              fontWeight: 700, userSelect: 'none',
-            }}
-          >
-            🐍 Python Script
-            <div style={{ fontSize: '10px', fontFamily: 'sans-serif', fontWeight: 400, color: '#5080a0', marginTop: '2px' }}>
-              Run Python code in-browser via Pyodide
-            </div>
-          </div>
-
-          {/* Muxer / Condenser */}
-          <div
-            draggable
-            onDragStart={() => { dragActivity.current = 'muxer' }}
-            style={{
-              background: '#f0f8ff', border: '1px solid #a0c8f0', borderRadius: '6px',
-              padding: '8px 10px', cursor: 'grab', marginBottom: '6px',
-              fontSize: '12px', fontFamily: 'monospace', color: '#1a6aa0',
-              fontWeight: 700, userSelect: 'none',
-            }}
-          >
-            ⇉ Muxer
-            <div style={{ fontSize: '10px', fontFamily: 'sans-serif', fontWeight: 400, color: '#4080a0', marginTop: '2px' }}>
-              Fan-out: runs all next nodes in parallel
-            </div>
-          </div>
-          <div
-            draggable
-            onDragStart={() => { dragActivity.current = 'condenser' }}
-            style={{
-              background: '#f0fff4', border: '1px solid #90d0a0', borderRadius: '6px',
-              padding: '8px 10px', cursor: 'grab', marginBottom: '6px',
-              fontSize: '12px', fontFamily: 'monospace', color: '#1a7a40',
-              fontWeight: 700, userSelect: 'none',
-            }}
-          >
-            ⇇ Condenser
-            <div style={{ fontSize: '10px', fontFamily: 'sans-serif', fontWeight: 400, color: '#408050', marginTop: '2px' }}>
-              Fan-in: merges parallel branches into one
-            </div>
-          </div>
-
-          {/* Loop */}
-          <div
-            draggable
-            onDragStart={() => { dragActivity.current = 'loop' }}
-            style={{
-              background: '#f0fffe', border: '1px solid #1abc9c', borderRadius: '6px',
-              padding: '8px 10px', cursor: 'grab', marginBottom: '6px',
-              fontSize: '12px', fontFamily: 'monospace', color: '#0e8c72',
-              fontWeight: 700, userSelect: 'none',
-            }}
-          >
-            ↻ Loop
-            <div style={{ fontSize: '10px', fontFamily: 'sans-serif', fontWeight: 400, color: '#1a9a80', marginTop: '2px' }}>
-              Iterate over a list. Label edges "body" and "done"
-            </div>
-          </div>
-          <div
-            draggable
-            onDragStart={() => { dragActivity.current = 'loop_next' }}
-            style={{
-              background: '#f5fff5', border: '1px solid #82c996', borderRadius: '6px',
-              padding: '8px 10px', cursor: 'grab', marginBottom: '10px',
-              fontSize: '12px', fontFamily: 'monospace', color: '#1a6a30',
-              fontWeight: 700, userSelect: 'none',
-            }}
-          >
-            ↺ Loop Next
-            <div style={{ fontSize: '10px', fontFamily: 'sans-serif', fontWeight: 400, color: '#2a804a', marginTop: '2px' }}>
-              End of one iteration — place after loop body
-            </div>
-          </div>
-
-          {activities.map(a => (
-            <ActivityCard key={a.name} info={a}
-              onDragStart={name => { dragActivity.current = name }} />
-          ))}
-
           {activities.length === 0 && (
             <div style={{ fontSize: '12px', color: '#aaa' }}>Loading activities…</div>
           )}
+
+          {(() => {
+            const groups: Record<string, ActivityInfo[]> = {}
+            for (const a of activities) {
+              const cat = a.meta?.category ?? 'Other'
+              if (!groups[cat]) groups[cat] = []
+              groups[cat].push(a)
+            }
+            const catOrder = ['ClickFunnels', 'PocketBase', 'HTTP', 'Flow Control', 'Utility', 'Other']
+            const sorted = Object.entries(groups).sort(([a], [b]) => {
+              const ai = catOrder.indexOf(a), bi = catOrder.indexOf(b)
+              return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi)
+            })
+            return sorted.map(([cat, acts], i) => (
+              <CategoryGroup
+                key={cat}
+                category={cat}
+                activities={acts}
+                onDragStart={name => { dragActivity.current = name }}
+                open={openCategory === cat}
+                onOpen={() => setOpenCategory(prev => prev === cat ? null : cat)}
+              />
+            ))
+          })()}
         </div>
+
+        {/* Canvas + debug panel column */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
         {/* Canvas */}
         <div style={{ flex: 1, overflow: 'auto', position: 'relative' }}>
@@ -868,15 +2802,15 @@ export default function WorkflowBuilder() {
               Graph "{graphNotFound}" was not found — it may have been created before the last server restart. The graph name has been pre-filled below. Rebuild it and click Save Graph.
             </div>
           )}
-          {connecting && (
-            <div style={{ position: 'absolute', top: '8px', left: '50%', transform: 'translateX(-50%)', background: '#f39c12', color: 'white', padding: '4px 14px', borderRadius: '20px', fontSize: '12px', fontWeight: 600, zIndex: 10, pointerEvents: 'none' }}>
-              Click another node's left port (●) to connect, or click canvas to cancel
+          {dragConnectLine && (
+            <div style={{ position: 'absolute', top: '8px', left: '50%', transform: 'translateX(-50%)', background: '#667eea', color: 'white', padding: '4px 14px', borderRadius: '20px', fontSize: '12px', fontWeight: 600, zIndex: 10, pointerEvents: 'none' }}>
+              {connectHover ? '⚡ Release to connect' : 'Drag to a node to connect…'}
             </div>
           )}
           <svg
             ref={svgRef}
             width={svgW} height={svgH}
-            style={{ display: 'block', cursor: connecting ? 'crosshair' : draggingNode ? 'grabbing' : 'default' }}
+            style={{ display: 'block', cursor: dragConnectLine ? 'crosshair' : draggingNode ? 'grabbing' : 'default' }}
             onDragOver={e => e.preventDefault()}
             onDrop={onCanvasDrop}
             onMouseMove={onSvgMouseMove}
@@ -921,6 +2855,28 @@ export default function WorkflowBuilder() {
               )
             })}
 
+            {/* Connect-hover highlight */}
+            {connectHover && (() => {
+              const hn = nodes.find(n => n.id === connectHover)
+              return hn ? (
+                <rect x={hn.x - 3} y={hn.y - 3} width={NODE_W + 6} height={NODE_H + 6}
+                  rx={10} fill="none" stroke="#22c55e" strokeWidth={3}
+                  strokeDasharray="6 3" opacity={0.9}>
+                  <animate attributeName="stroke-dashoffset" from="0" to="-18" dur="0.4s" repeatCount="indefinite" />
+                </rect>
+              ) : null
+            })()}
+
+            {/* Live drag-connect line */}
+            {dragConnectLine && (
+              <line
+                x1={dragConnectLine.x1} y1={dragConnectLine.y1}
+                x2={dragConnectLine.x2} y2={dragConnectLine.y2}
+                stroke={connectHover ? '#22c55e' : '#667eea'} strokeWidth={2}
+                strokeDasharray="6 4" opacity={0.85} pointerEvents="none"
+              />
+            )}
+
             {/* Nodes */}
             {nodes.map(n => {
               const isEnd = n.activityName === 'END'
@@ -944,6 +2900,18 @@ export default function WorkflowBuilder() {
                     <rect x={n.x - 3} y={n.y - 3} width={NODE_W + 6} height={NODE_H + 6}
                       rx={9} fill="none" stroke="#667eea" strokeWidth={2} strokeDasharray="4 2" />
                   )}
+                  {debugOpen && debugCurrentNodeId === n.id && (
+                    <rect x={n.x - 4} y={n.y - 4} width={NODE_W + 8} height={NODE_H + 8}
+                      rx={10} fill="none" stroke="#f39c12" strokeWidth={3} />
+                  )}
+                  {debugOpen && debugCompletedIds.has(n.id) && debugCurrentNodeId !== n.id && (
+                    <rect x={n.x - 3} y={n.y - 3} width={NODE_W + 6} height={NODE_H + 6}
+                      rx={9} fill="none" stroke="#27ae60" strokeWidth={2} />
+                  )}
+                  {debugOpen && debugFailedIds.has(n.id) && (
+                    <rect x={n.x - 3} y={n.y - 3} width={NODE_W + 6} height={NODE_H + 6}
+                      rx={9} fill="none" stroke="#e74c3c" strokeWidth={2} />
+                  )}
                   <rect x={n.x} y={n.y} width={NODE_W} height={NODE_H} rx={6}
                     fill={fill} stroke={borderColor} strokeWidth={isSelected ? 2 : 1} />
 
@@ -955,9 +2923,8 @@ export default function WorkflowBuilder() {
                       </text>
                       {/* Input port only */}
                       <circle cx={n.x - PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting ? '#27ae60' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: connecting ? 'pointer' : 'default' }}
-                        onClick={e => onInputPortClick(e, n.id)} />
+                        fill={'#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'default' }} />
                     </>
                   ) : isMuxer ? (
                     <>
@@ -968,13 +2935,12 @@ export default function WorkflowBuilder() {
                       <text x={n.x + NODE_W / 2} y={n.y + 36}
                         textAnchor="middle" fontSize={10} fill="#4080a0" fontFamily="monospace">muxer</text>
                       <circle cx={n.x - PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting ? '#27ae60' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: connecting ? 'pointer' : 'default' }}
-                        onClick={e => onInputPortClick(e, n.id)} />
+                        fill={'#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'default' }} />
                       <circle cx={n.x + NODE_W + PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: 'pointer' }}
-                        onClick={e => onOutputPortClick(e, n.id)} />
+                        fill={dragConnectFrom.current === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'crosshair' }}
+                        onMouseDown={e => onOutputPortMouseDown(e, n.id)} />
                     </>
                   ) : isCondenser ? (
                     <>
@@ -985,13 +2951,12 @@ export default function WorkflowBuilder() {
                       <text x={n.x + NODE_W / 2} y={n.y + 36}
                         textAnchor="middle" fontSize={10} fill="#408050" fontFamily="monospace">condenser</text>
                       <circle cx={n.x - PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting ? '#27ae60' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: connecting ? 'pointer' : 'default' }}
-                        onClick={e => onInputPortClick(e, n.id)} />
+                        fill={'#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'default' }} />
                       <circle cx={n.x + NODE_W + PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: 'pointer' }}
-                        onClick={e => onOutputPortClick(e, n.id)} />
+                        fill={dragConnectFrom.current === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'crosshair' }}
+                        onMouseDown={e => onOutputPortMouseDown(e, n.id)} />
                     </>
                   ) : isLoop ? (
                     <>
@@ -1002,13 +2967,12 @@ export default function WorkflowBuilder() {
                       <text x={n.x + NODE_W / 2} y={n.y + 36}
                         textAnchor="middle" fontSize={10} fill="#1abc9c" fontFamily="monospace">loop</text>
                       <circle cx={n.x - PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting ? '#27ae60' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: connecting ? 'pointer' : 'default' }}
-                        onClick={e => onInputPortClick(e, n.id)} />
+                        fill={'#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'default' }} />
                       <circle cx={n.x + NODE_W + PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: 'pointer' }}
-                        onClick={e => onOutputPortClick(e, n.id)} />
+                        fill={dragConnectFrom.current === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'crosshair' }}
+                        onMouseDown={e => onOutputPortMouseDown(e, n.id)} />
                     </>
                   ) : isLoopNext ? (
                     <>
@@ -1019,9 +2983,12 @@ export default function WorkflowBuilder() {
                       <text x={n.x + NODE_W / 2} y={n.y + 36}
                         textAnchor="middle" fontSize={10} fill="#82c996" fontFamily="monospace">loop_next</text>
                       <circle cx={n.x - PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting ? '#27ae60' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: connecting ? 'pointer' : 'default' }}
-                        onClick={e => onInputPortClick(e, n.id)} />
+                        fill={'#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'default' }} />
+                      <circle cx={n.x + NODE_W + PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
+                        fill={dragConnectFrom.current === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'crosshair' }}
+                        onMouseDown={e => onOutputPortMouseDown(e, n.id)} />
                     </>
                   ) : isPython ? (
                     <>
@@ -1040,13 +3007,12 @@ export default function WorkflowBuilder() {
                         <text x={n.x + NODE_W - 6} y={n.y + 14} textAnchor="end" fontSize={11}>🔄</text>
                       )}
                       <circle cx={n.x - PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting ? '#27ae60' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: connecting ? 'pointer' : 'default' }}
-                        onClick={e => onInputPortClick(e, n.id)} />
+                        fill={'#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'default' }} />
                       <circle cx={n.x + NODE_W + PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: 'pointer' }}
-                        onClick={e => onOutputPortClick(e, n.id)} />
+                        fill={dragConnectFrom.current === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'crosshair' }}
+                        onMouseDown={e => onOutputPortMouseDown(e, n.id)} />
                     </>
                   ) : (
                     <>
@@ -1068,14 +3034,13 @@ export default function WorkflowBuilder() {
 
                       {/* Input port (left) */}
                       <circle cx={n.x - PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting ? '#27ae60' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: connecting ? 'pointer' : 'default' }}
-                        onClick={e => onInputPortClick(e, n.id)} />
+                        fill={'#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'default' }} />
                       {/* Output port (right) */}
                       <circle cx={n.x + NODE_W + PORT_R} cy={n.y + NODE_H / 2} r={PORT_R}
-                        fill={connecting === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
-                        style={{ cursor: 'pointer' }}
-                        onClick={e => onOutputPortClick(e, n.id)} />
+                        fill={dragConnectFrom.current === n.id ? '#667eea' : '#e0e6ed'} stroke="#aaa" strokeWidth={1}
+                        style={{ cursor: 'crosshair' }}
+                        onMouseDown={e => onOutputPortMouseDown(e, n.id)} />
                     </>
                   )}
                 </g>
@@ -1083,6 +3048,130 @@ export default function WorkflowBuilder() {
             })}
           </svg>
         </div>
+
+        {/* Debug panel (inside canvas+debug column, below canvas) */}
+        {debugOpen && (
+          <div style={{ height: `${debugHeight}px`, borderTop: '2px solid #7c5cbf', background: '#1a1a2e', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+            {/* Resize handle */}
+            <div
+              onMouseDown={onDebugResizeStart}
+              style={{ height: '6px', cursor: 'ns-resize', background: '#2d2d4e', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            >
+              <div style={{ width: '40px', height: '2px', background: '#5a4a8a', borderRadius: '2px' }} />
+            </div>
+            {/* Two-column body */}
+            <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+              {/* Left: context editor */}
+              <div style={{ width: '45%', display: 'flex', flexDirection: 'column', borderRight: '1px solid #2d2d4e', padding: '8px' }}>
+                <div style={{ fontSize: '10px', fontWeight: 700, color: '#9b8fd4', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+                  Context (editable)
+                </div>
+                <textarea
+                  key={debugResetKey}
+                  value={debugContext}
+                  onChange={e => setDebugContext(e.target.value)}
+                  spellCheck={false}
+                  style={{
+                    flex: 1, width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px',
+                    padding: '6px', background: '#0d0d1a', color: '#c9d1d9', border: '1px solid #2d2d4e',
+                    borderRadius: '4px', resize: 'none', outline: 'none', lineHeight: 1.5,
+                  }}
+                />
+                <div style={{ fontSize: '10px', color: '#6b7280', marginTop: '4px', fontFamily: 'monospace' }}>
+                  {debugNodes[debugNodeIdx]
+                    ? `Node ${debugNodeIdx + 1}/${debugNodes.length}: ${debugNodes[debugNodeIdx].id} → ${debugNodes[debugNodeIdx].activityName}`
+                    : debugNodes.length > 0
+                      ? `Done — ${debugNodes.length} node${debugNodes.length !== 1 ? 's' : ''} completed`
+                      : 'No nodes in walk (set a start node)'}
+                </div>
+              </div>
+
+              {/* Right: step output */}
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#9b8fd4', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    Context After Step
+                  </div>
+                  {lastDebugResult && !lastDebugResult.error && (
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(JSON.stringify(lastDebugResult.output, null, 2))
+                        setDebugCopied(true)
+                        setTimeout(() => setDebugCopied(false), 1500)
+                      }}
+                      style={{ fontSize: '10px', padding: '2px 8px', background: debugCopied ? '#166534' : '#2d2d4e', border: `1px solid ${debugCopied ? '#4ade80' : '#4a4a6a'}`, borderRadius: '4px', color: debugCopied ? '#4ade80' : '#9b8fd4', cursor: 'pointer', transition: 'all 0.2s' }}
+                    >
+                      {debugCopied ? '✓ Copied' : 'Copy JSON'}
+                    </button>
+                  )}
+                </div>
+                <div style={{ flex: 1, overflowY: 'auto', fontFamily: 'monospace', fontSize: '11px', lineHeight: 1.5 }}>
+                  {lastDebugResult ? (
+                    lastDebugResult.error ? (
+                      <div style={{ color: '#f87171', whiteSpace: 'pre-wrap' }}>
+                        Error in {lastDebugResult.activityName}:{'\n'}{lastDebugResult.error}
+                      </div>
+                    ) : (
+                      <div style={{ color: '#86efac', whiteSpace: 'pre-wrap' }}>
+                        {JSON.stringify(lastDebugResult.output, null, 2)}
+                      </div>
+                    )
+                  ) : (
+                    <div style={{ color: '#4b5563' }}>No steps run yet. Click "Step" to execute the current node.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom button bar */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 8px', borderTop: '1px solid #2d2d4e', flexShrink: 0 }}>
+              {debugNodeIdx >= debugNodes.length && debugNodes.length > 0 ? (
+                <span style={{ fontSize: '12px', color: '#4ade80', fontWeight: 600 }}>Done</span>
+              ) : (
+                <>
+                  <button
+                    onClick={() => debugStep()}
+                    disabled={debugRunning || debugNodeIdx >= debugNodes.length}
+                    style={{
+                      ...iconBtn('#7c5cbf'),
+                      opacity: (debugRunning || debugNodeIdx >= debugNodes.length) ? 0.5 : 1,
+                      fontSize: '12px', padding: '4px 10px',
+                    }}
+                  >
+                    ▶ Step{debugNodes[debugNodeIdx] ? `: ${debugNodes[debugNodeIdx].activityName}` : ''}
+                  </button>
+                  <button
+                    onClick={debugRunAll}
+                    disabled={debugRunning || debugNodeIdx >= debugNodes.length}
+                    style={{
+                      ...iconBtn('#5a3ea0'),
+                      opacity: (debugRunning || debugNodeIdx >= debugNodes.length) ? 0.5 : 1,
+                      fontSize: '12px', padding: '4px 10px',
+                    }}
+                  >
+                    Run All
+                  </button>
+                </>
+              )}
+              <button
+                onClick={() => { setDebugNodeIdx(0); setDebugResults([]); setDebugResetKey(k => k + 1) }}
+                disabled={debugRunning}
+                style={{ ...iconBtn('#374151'), opacity: debugRunning ? 0.5 : 1, fontSize: '12px', padding: '4px 10px' }}
+              >
+                Reset
+              </button>
+              {debugRunning && (
+                <span style={{ fontSize: '11px', color: '#9b8fd4', fontFamily: 'monospace' }}>running…</span>
+              )}
+              <div style={{ flex: 1 }} />
+              <span style={{ fontSize: '10px', color: '#4b5563', fontFamily: 'monospace' }}>
+                {debugResults.length}/{debugNodes.length} steps
+              </span>
+            </div>
+          </div>
+        )}
+
+        </div>{/* end canvas+debug column */}
 
         {/* Right panel — properties */}
         <div style={{ width: '240px', background: 'white', borderLeft: '1px solid #e0e6ed', padding: '14px', overflowY: 'auto', flexShrink: 0 }}>
@@ -1100,6 +3189,8 @@ export default function WorkflowBuilder() {
                 setSelectedNode(null)
               }}
               onTestFromHere={nodeId => setTestModal(nodeId)}
+              onInsertMapperNode={insertMapperNode}
+              debugContext={enrichedDebugContext}
             />
           ) : selEdge ? (
             <EdgeEditor
@@ -1112,7 +3203,7 @@ export default function WorkflowBuilder() {
               <div style={{ fontWeight: 700, fontSize: '13px', color: '#555', marginBottom: '12px' }}>Canvas</div>
               <div style={{ fontSize: '12px', color: '#aaa', lineHeight: 1.7 }}>
                 <div>• Drag activities from the left panel onto the canvas</div>
-                <div>• Click the right ● port of a node to start connecting</div>
+                <div>• Drag from the right ● port of a node to connect to another node</div>
                 <div>• Click the left ● port of another node to complete the edge</div>
                 <div>• Click a node or edge to edit its properties</div>
                 <div>• Drag a node to reposition it</div>

@@ -2,8 +2,10 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -164,8 +166,18 @@ func (e *Engine) runWorkflow(ctx context.Context, wf *Workflow) {
 
 		// Evaluate transitions to find the next node.
 		nextNodeID, found := graph.NextNode(nodeID, inst.Output)
-		if !found || nextNodeID == "" {
-			// No matching transition or explicit end-of-workflow.
+		if !found {
+			node := graph.Nodes[nodeID]
+			if node != nil && len(node.Transitions) == 0 {
+				e.logger.Printf("[workflow] node %s (%s) has no transitions — workflow ends here. Connect it to the next node in the builder.", nodeID, node.ActivityName)
+			} else {
+				e.logger.Printf("[workflow] node %s: no transition matched output keys=%v — workflow ends here.", nodeID, outputKeys(inst.Output))
+			}
+			e.completeWorkflow(ctx, wf)
+			return
+		}
+		if nextNodeID == "" {
+			// Explicit end-of-workflow (transition to END node).
 			e.completeWorkflow(ctx, wf)
 			return
 		}
@@ -481,9 +493,19 @@ func (e *Engine) runLoop(ctx context.Context, wf *Workflow, graph *ActivityGraph
 		itemKey = "item"
 	}
 
-	items, ok := toAnySlice(wf.Context[listKey])
+	// Support dotted paths like "records.records"
+	var rawList any = map[string]any(wf.Context)
+	for _, part := range strings.Split(listKey, ".") {
+		m, ok := rawList.(map[string]any)
+		if !ok {
+			rawList = nil
+			break
+		}
+		rawList = m[part]
+	}
+	items, ok := toAnySlice(rawList)
 	if !ok {
-		return "", fmt.Errorf("loop: context key %q is not a list (got %T)", listKey, wf.Context[listKey])
+		return "", fmt.Errorf("loop: context key %q is not a list (got %T)", listKey, rawList)
 	}
 
 	var bodyNodeID, doneNodeID string
@@ -494,6 +516,10 @@ func (e *Engine) runLoop(ctx context.Context, wf *Workflow, graph *ActivityGraph
 		case "done":
 			doneNodeID = t.NextNode
 		}
+	}
+	// Fallback: if no explicit "body" label, use the first transition as body
+	if bodyNodeID == "" && len(loopNode.Transitions) > 0 {
+		bodyNodeID = loopNode.Transitions[0].NextNode
 	}
 	if bodyNodeID == "" {
 		return "", fmt.Errorf("loop node %q has no 'body' transition", loopNode.ID)
@@ -605,21 +631,77 @@ func buildInput(ctx map[string]any, mapping []string, staticInput map[string]any
 			}
 		}
 	}
-	// Overlay static node input, applying {{key}} template interpolation.
+	// Overlay static node input, applying {{key}} template interpolation deeply.
 	for k, v := range staticInput {
-		if s, ok := v.(string); ok {
-			out[k] = interpolateCtx(s, ctx)
-		} else {
-			out[k] = v
-		}
+		out[k] = deepInterpolate(v, ctx)
 	}
 	return out
 }
 
-// interpolateCtx replaces {{key}} placeholders with values from ctx.
+// deepInterpolate recursively walks a value and interpolates {{key}} placeholders
+// in any strings found, including inside maps and slices.
+func deepInterpolate(v any, ctx map[string]any) any {
+	switch val := v.(type) {
+	case string:
+		interpolated := interpolateCtx(val, ctx)
+		trimmed := strings.TrimSpace(interpolated)
+		if (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
+			(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")) {
+			var parsed any
+			if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+				return parsed
+			}
+		}
+		return interpolated
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, item := range val {
+			out[k] = deepInterpolate(item, ctx)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = deepInterpolate(item, ctx)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func outputKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// interpolateCtx replaces {{key}} and {{a.b.c}} placeholders with values from ctx.
 func interpolateCtx(s string, ctx map[string]any) string {
+	// Flat keys first.
 	for k, v := range ctx {
 		s = strings.ReplaceAll(s, "{{"+k+"}}", fmt.Sprintf("%v", v))
 	}
+	// Dot-notation: resolve any remaining {{a.b.c}} placeholders.
+	s = dotPlaceholderRe.ReplaceAllStringFunc(s, func(match string) string {
+		key := match[2 : len(match)-2] // strip {{ }}
+		parts := strings.Split(key, ".")
+		var cur any = map[string]any(ctx)
+		for _, p := range parts {
+			m, ok := cur.(map[string]any)
+			if !ok {
+				return match // unresolved — leave as-is
+			}
+			cur, ok = m[p]
+			if !ok {
+				return match
+			}
+		}
+		return fmt.Sprintf("%v", cur)
+	})
 	return s
 }
+
+var dotPlaceholderRe = regexp.MustCompile(`\{\{[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+\}\}`)

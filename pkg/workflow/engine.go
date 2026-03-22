@@ -12,6 +12,7 @@ import (
 
 // ActivityMeta holds documentation for a registered activity (for the visual builder UI).
 type ActivityMeta struct {
+	Category     string      `json:"category,omitempty"`
 	Description  string      `json:"description,omitempty"`
 	InputFields  []FieldMeta `json:"input_fields,omitempty"`
 	OutputFields []FieldMeta `json:"output_fields,omitempty"`
@@ -385,6 +386,18 @@ func (e *Engine) GetGraph(name string) (*ActivityGraph, bool) {
 // Store returns the underlying Store (for direct queries from HTTP handlers).
 func (e *Engine) Store() Store {
 	return e.store
+}
+
+// ExecuteActivity looks up a registered activity by name and invokes it directly,
+// bypassing the workflow scheduler. Useful for one-off node testing from the UI.
+func (e *Engine) ExecuteActivity(ctx context.Context, name string, input map[string]any) (map[string]any, error) {
+	e.mu.RLock()
+	fn, ok := e.registry[name]
+	e.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("activity %q not registered", name)
+	}
+	return fn(ctx, input)
 }
 
 // ListGraphs returns all registered graph names.

@@ -17,6 +17,12 @@ func SetupCollections(app core.App, legacyDB *sql.DB, logger *log.Logger) error 
 	if err := ensureAutodateFields(app); err != nil {
 		return err
 	}
+	if err := migrateBirthChartRecords(app, logger); err != nil {
+		return err
+	}
+	if err := seedAppSettings(app, logger); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -35,6 +41,7 @@ func createCollections(app core.App, logger *log.Logger) error {
 		{"shares", createShares},
 		{"report_links", createReportLinks},
 		{"utm_source", createUtmSource},
+		{"app_settings", createAppSettings},
 	}
 
 	for _, c := range collections {

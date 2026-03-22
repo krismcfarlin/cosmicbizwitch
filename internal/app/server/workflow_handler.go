@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"cosmicbizwitch/pkg/workflow"
 )
@@ -184,6 +185,70 @@ func (s *Server) handleWorkflowActivities(w http.ResponseWriter, r *http.Request
 	s.respondJSON(w, http.StatusOK, map[string]any{"activities": activities})
 }
 
+// handleExecuteNode executes a single registered activity by name and returns its output.
+// POST /api/workflows/execute-node
+// Body: { "activity": "my_activity", "input": { ... } }
+func (s *Server) handleExecuteNode(w http.ResponseWriter, r *http.Request) {
+	// Catch any panic so the browser always gets a JSON response instead of a dropped connection.
+	defer func() {
+		if rec := recover(); rec != nil {
+			s.logger.Printf("handleExecuteNode: panic: %v", rec)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]any{"error": fmt.Sprintf("internal panic: %v", rec)})
+		}
+	}()
+
+	var req struct {
+		Activity string         `json:"activity"`
+		Input    map[string]any `json:"input"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.Activity == "" {
+		http.Error(w, "activity required", http.StatusBadRequest)
+		return
+	}
+	if req.Input == nil {
+		req.Input = map[string]any{}
+	}
+	// Coerce any string values that are JSON objects/arrays back to native types.
+	// The debug panel sends static inputs (e.g. "data") as interpolated JSON strings.
+	for k, v := range req.Input {
+		if s2, ok := v.(string); ok {
+			t := strings.TrimSpace(s2)
+			if (strings.HasPrefix(t, "{") && strings.HasSuffix(t, "}")) ||
+				(strings.HasPrefix(t, "[") && strings.HasSuffix(t, "]")) {
+				var parsed any
+				if err := json.Unmarshal([]byte(t), &parsed); err == nil {
+					req.Input[k] = parsed
+				}
+			}
+		}
+	}
+	s.logger.Printf("execute-node: activity=%q input_keys=%v", req.Activity, inputKeys(req.Input))
+	output, err := s.engine.ExecuteActivity(r.Context(), req.Activity, req.Input)
+	if err != nil {
+		s.logger.Printf("execute-node: activity=%q error: %v", req.Activity, err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"error": err.Error()})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"output": output})
+}
+
+func inputKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // handleWorkflowGraphs returns all registered graph definitions.
 // GET /api/workflows/graphs
 func (s *Server) handleWorkflowGraphs(w http.ResponseWriter, r *http.Request) {
@@ -232,4 +297,38 @@ func (s *Server) handleWorkflowStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handlePbCollectionFields returns the field names and types for a PocketBase collection.
+// GET /api/pb/collections/{name}/fields
+func (s *Server) handlePbCollectionFields(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.respondJSON(w, http.StatusBadRequest, map[string]any{"error": "collection name required"})
+		return
+	}
+
+	col, err := s.store.App().FindCollectionByNameOrId(name)
+	if err != nil {
+		s.respondJSON(w, http.StatusNotFound, map[string]any{"error": "collection not found: " + name})
+		return
+	}
+
+	type fieldInfo struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	fields := make([]fieldInfo, 0, len(col.Fields))
+	for _, f := range col.Fields {
+		// Skip internal PocketBase system fields
+		if f.GetName() == "id" || f.GetName() == "created" || f.GetName() == "updated" {
+			continue
+		}
+		fields = append(fields, fieldInfo{
+			Name: f.GetName(),
+			Type: f.Type(),
+		})
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]any{"fields": fields})
 }

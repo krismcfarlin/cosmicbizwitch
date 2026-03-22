@@ -22,6 +22,7 @@ type Server struct {
 	mcpServer  *mcp.MCPServer
 	engine     *workflow.Engine
 	triggers   *triggers.Manager
+	settings   *storage.SettingsManager
 	logger     *log.Logger
 	logBuffer  *LogBuffer
 	httpServer *http.Server
@@ -35,6 +36,7 @@ type Config struct {
 	CFClient  *clickfunnels.Client
 	Engine    *workflow.Engine
 	Triggers  *triggers.Manager
+	Settings  *storage.SettingsManager
 }
 
 // New creates a new server instance
@@ -48,6 +50,7 @@ func New(store *storage.Store, cfg Config) *Server {
 		mcpServer: mcp.NewMCPServer(store, cfg.Logger, cfg.CFClient),
 		engine:    cfg.Engine,
 		triggers:  cfg.Triggers,
+		settings:  cfg.Settings,
 		logger:    cfg.Logger,
 		logBuffer: cfg.LogBuffer,
 	}
@@ -102,6 +105,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workflows/graphs", s.requireAuth(s.handleWorkflowGraphs))
 	mux.HandleFunc("GET /api/workflows/activities", s.requireAuth(s.handleWorkflowActivitiesList))
 	mux.HandleFunc("POST /api/workflows/graphs", s.requireAuth(s.handleGraphSave))
+	mux.HandleFunc("POST /api/workflows/execute-node", s.requireAuth(s.handleExecuteNode))
+	mux.HandleFunc("GET /api/pb/collections/{name}/fields", s.requireAuth(s.handlePbCollectionFields))
 	mux.HandleFunc("GET /api/workflows/{id}", s.requireAuth(s.handleWorkflowGet))
 	mux.HandleFunc("GET /api/workflows/{id}/activities", s.requireAuth(s.handleWorkflowActivities))
 	mux.HandleFunc("GET /api/workflows", s.requireAuth(s.handleWorkflowList))
@@ -123,6 +128,14 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Trigger pages (SPA)
 	mux.HandleFunc("GET /triggers", s.requireAuth(s.handleLogsPage))
 	mux.HandleFunc("GET /triggers/{path...}", s.requireAuth(s.handleLogsPage))
+
+	// Settings API (auth required)
+	mux.HandleFunc("GET /app/settings", s.requireAuth(s.handleSettingsList))
+	mux.HandleFunc("PUT /app/settings/{key}", s.requireAuth(s.handleSettingsUpdate))
+
+	// Settings SPA page (auth required)
+	mux.HandleFunc("GET /settings", s.requireAuth(s.handleLogsPage))
+	mux.HandleFunc("GET /settings/{path...}", s.requireAuth(s.handleLogsPage))
 
 	// Home (catch-all, auth required)
 	mux.HandleFunc("/", s.handleHome)
@@ -194,6 +207,44 @@ func (s *Server) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.respondJSON(w, http.StatusOK, resp)
+}
+
+// handleSettingsList returns all app settings. Secret values are masked as empty strings.
+func (s *Server) handleSettingsList(w http.ResponseWriter, r *http.Request) {
+	if s.settings == nil {
+		s.respondJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+	settings, err := s.settings.All()
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to load settings", err)
+		return
+	}
+	s.respondJSON(w, http.StatusOK, settings)
+}
+
+// handleSettingsUpdate writes a new value for the given setting key and reloads the CF client.
+func (s *Server) handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.settings == nil {
+		http.Error(w, "settings not available", http.StatusServiceUnavailable)
+		return
+	}
+	key := r.PathValue("key")
+	var body struct {
+		Value string `json:"value"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if err := s.settings.Set(key, body.Value); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to save setting", err)
+		return
+	}
+	if err := s.settings.Reload(s.logger); err != nil {
+		s.logger.Printf("settings reload after update: %v", err)
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // Helper functions
