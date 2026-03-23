@@ -225,12 +225,15 @@ func seedAppSettings(app core.App, logger *log.Logger) error {
 	seeds := []struct {
 		key          string
 		label        string
+		description  string
 		isSecret     bool
 		defaultValue string
 	}{
-		{"CF_API_KEY", "ClickFunnels API Key", true, ""},
-		{"CF_SUBDOMAIN", "ClickFunnels Subdomain", false, "cosmicbizwitchllc"},
-		{"CF_WORKSPACE_ID", "ClickFunnels Workspace ID", false, ""},
+		{"CF_API_KEY", "ClickFunnels API Key", "API key from your ClickFunnels account", true, ""},
+		{"CF_SUBDOMAIN", "ClickFunnels Subdomain", "Your ClickFunnels subdomain (e.g. yourbrand)", false, "cosmicbizwitchllc"},
+		{"CF_WORKSPACE_ID", "ClickFunnels Workspace ID", "Your ClickFunnels workspace ID", false, ""},
+		{"OPENROUTER_API_KEY", "OpenRouter API Key", "API key from openrouter.ai — enables access to many models via one key", true, ""},
+		{"ANTHROPIC_API_KEY", "Anthropic API Key", "API key from console.anthropic.com — for direct Anthropic API access", true, ""},
 	}
 
 	col, err := app.FindCollectionByNameOrId("app_settings")
@@ -261,6 +264,7 @@ func seedAppSettings(app core.App, logger *log.Logger) error {
 		rec := core.NewRecord(col)
 		rec.Set("key", s.key)
 		rec.Set("label", s.label)
+		rec.Set("description", s.description)
 		rec.Set("is_secret", s.isSecret)
 		val := os.Getenv(s.key)
 		if val == "" {

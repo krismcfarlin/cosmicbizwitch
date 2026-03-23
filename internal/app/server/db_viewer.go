@@ -222,7 +222,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 <div style="min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #667eea 0%%, #764ba2 100%%);">
 	<div style="width: 100%%; max-width: 400px; padding: 20px;">
 		<div style="background: white; border-radius: 8px; padding: 40px; box-shadow: 0 10px 40px rgba(0,0,0,0.2);">
-			<h1 style="text-align: center; color: #333; margin-bottom: 30px; font-size: 28px;">Platform Starter</h1>
+			<h1 style="text-align: center; color: #333; margin-bottom: 30px; font-size: 28px;">CosmicBizWitch</h1>
 			%s
 			<form method="POST" action="/login">
 				<div style="margin-bottom: 20px;">
@@ -241,7 +241,7 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 `, errorMsg)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, baseTemplate("Platform Starter Login", loginHTML))
+	fmt.Fprint(w, baseTemplate("CosmicBizWitch Login", loginHTML))
 }
 
 // handleLoginSubmit processes the login form (POST /login).

@@ -31,7 +31,7 @@ func main() {
 	logger := log.New(logBuf.TeeWriter(os.Stdout), "[APP] ", log.LstdFlags)
 
 	dbPath := getEnv("DB_PATH", "data/coaching.db")
-	port := getEnvInt("PORT", 8083)
+	port := getEnvInt("PORT", 8085)
 
 	// Resolve paths
 	absDBPath, err := filepath.Abs(dbPath)
