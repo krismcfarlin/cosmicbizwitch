@@ -38,15 +38,23 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 			if src, _ := input["_source"].(string); src == "trigger" {
 				return nil, workflow.ErrSkip
 			}
-			raw, _ := input["data"].(string)
-			if raw == "" {
+			// input["data"] may arrive as a string or as an already-parsed map
+			// (deepInterpolate auto-parses JSON-shaped strings).
+			switch d := input["data"].(type) {
+			case map[string]any:
+				return d, nil
+			case string:
+				if d == "" {
+					return map[string]any{}, nil
+				}
+				var parsed map[string]any
+				if err := json.Unmarshal([]byte(d), &parsed); err != nil {
+					return nil, fmt.Errorf("test_data: invalid JSON in 'data' field: %w", err)
+				}
+				return parsed, nil
+			default:
 				return map[string]any{}, nil
 			}
-			var parsed map[string]any
-			if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-				return nil, fmt.Errorf("test_data: invalid JSON in 'data' field: %w", err)
-			}
-			return parsed, nil
 		},
 		workflow.ActivityMeta{
 			Category:    "Utility",
@@ -744,10 +752,25 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 	)
 
 	// cf_upsert_contact: upserts a ClickFunnels contact into the cf_contacts PocketBase collection.
-	// Expects the output fields from cf_get_contact in the workflow context.
+	// Reads contact data from the nested object at input[result_var] (default "contact"),
+	// as produced by cf_get_contact.
 	eng.RegisterActivityWithMeta("cf_upsert_contact",
 		func(_ context.Context, input map[string]any) (map[string]any, error) {
-			cfID := int(toFloat64OrZero(input["cf_id"]))
+			resultVar, _ := input["result_var"].(string)
+			if resultVar == "" {
+				resultVar = "contact"
+			}
+
+			// Unpack contact data from the nested result_var object.
+			contactData, _ := input[resultVar].(map[string]any)
+			if contactData == nil {
+				return nil, fmt.Errorf("cf_upsert_contact: no contact data found at %q", resultVar)
+			}
+			if errMsg, _ := contactData["error"].(string); errMsg != "" {
+				return nil, fmt.Errorf("cf_upsert_contact: contact lookup failed: %s", errMsg)
+			}
+
+			cfID := int(toFloat64OrZero(contactData["cf_id"]))
 			if cfID == 0 {
 				return nil, fmt.Errorf("cf_upsert_contact: cf_id is required")
 			}
@@ -771,19 +794,19 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 			}
 
 			rec.Set("cf_id", cfID)
-			rec.Set("cf_public_id", input["cf_public_id"])
-			rec.Set("email_address", input["email_address"])
-			rec.Set("first_name", input["first_name"])
-			rec.Set("last_name", input["last_name"])
-			rec.Set("phone_number", input["phone_number"])
-			rec.Set("is_active", input["is_active"])
+			rec.Set("cf_public_id", contactData["cf_public_id"])
+			rec.Set("email_address", contactData["email_address"])
+			rec.Set("first_name", contactData["first_name"])
+			rec.Set("last_name", contactData["last_name"])
+			rec.Set("phone_number", contactData["phone_number"])
+			rec.Set("is_active", contactData["is_active"])
 
-			if tags := input["tags"]; tags != nil {
+			if tags := contactData["tags"]; tags != nil {
 				if b, err := json.Marshal(tags); err == nil {
 					rec.Set("tags", string(b))
 				}
 			}
-			if attrs := input["custom_attributes"]; attrs != nil {
+			if attrs := contactData["custom_attributes"]; attrs != nil {
 				if b, err := json.Marshal(attrs); err == nil {
 					rec.Set("custom_attributes", string(b))
 				}
@@ -793,30 +816,18 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 				return nil, fmt.Errorf("cf_upsert_contact: save: %w", err)
 			}
 
-			out := make(map[string]any, len(input))
-			for k, v := range input {
-				out[k] = v
-			}
-			out["pb_record_id"] = rec.Id
-			return out, nil
+			return map[string]any{
+				"pb_record_id": rec.Id,
+			}, nil
 		},
 		workflow.ActivityMeta{
 			Category:    "ClickFunnels",
-			Description: "Upserts a ClickFunnels contact into the cf_contacts PocketBase collection",
+			Description: "Upserts a ClickFunnels contact into the cf_contacts PocketBase collection. Reads contact data from the nested object at result_var (default: \"contact\") as produced by cf_get_contact.",
 			InputFields: []workflow.FieldMeta{
-				{Name: "cf_id", Type: "number", Description: "ClickFunnels contact ID", Required: true},
-				{Name: "cf_public_id", Type: "string"},
-				{Name: "email_address", Type: "string"},
-				{Name: "first_name", Type: "string"},
-				{Name: "last_name", Type: "string"},
-				{Name: "phone_number", Type: "string"},
-				{Name: "is_active", Type: "bool"},
-				{Name: "tags", Type: "any"},
-				{Name: "custom_attributes", Type: "object"},
+				{Name: "result_var", Type: "string", Description: "Context key holding the cf_get_contact result (default: \"contact\")"},
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "pb_record_id", Type: "string", Description: "PocketBase record ID of the upserted contact"},
-				{Name: "*", Type: "any", Description: "All input fields passed through"},
 			},
 		},
 	)
@@ -825,17 +836,34 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 	// If cfClient is nil (CF_API_KEY not configured), the activity returns an error.
 	eng.RegisterActivityWithMeta("cf_get_contact",
 		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			resultVar, _ := input["result_var"].(string)
+			if resultVar == "" {
+				resultVar = "contact"
+			}
+
+			setError := func(msg string) (map[string]any, error) {
+				return map[string]any{
+					resultVar: map[string]any{
+						"error":  msg,
+						"status": "error",
+					},
+				}, nil
+			}
+
 			cfClient := getCF()
 			if cfClient == nil {
-				return nil, fmt.Errorf("cf_get_contact: ClickFunnels client not configured (CF_API_KEY missing)")
+				return setError("ClickFunnels client not configured (CF_API_KEY missing)")
 			}
 			contactID := int(toFloat64OrZero(input["contact_id"]))
 			if contactID == 0 {
-				return nil, fmt.Errorf("cf_get_contact: contact_id is required and must be non-zero")
+				return setError("contact_id is required and must be non-zero")
 			}
 			contact, err := cfClient.GetContact(ctx, contactID)
 			if err != nil {
-				return nil, fmt.Errorf("cf_get_contact: %w", err)
+				return setError(err.Error())
+			}
+			if contact == nil {
+				return setError("no contact returned")
 			}
 			email := ""
 			if contact.EmailAddress != nil {
@@ -854,33 +882,29 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 				phoneNumber = *contact.PhoneNumber
 			}
 			return map[string]any{
-				"cf_id":             contact.ID,
-				"cf_public_id":      contact.PublicID,
-				"email_address":     email,
-				"first_name":        firstName,
-				"last_name":         lastName,
-				"phone_number":      phoneNumber,
-				"is_active":         contact.IsActive,
-				"tags":              contact.Tags,
-				"custom_attributes": contact.CustomAttributes,
+				resultVar: map[string]any{
+					"status":            "ok",
+					"cf_id":             contact.ID,
+					"cf_public_id":      contact.PublicID,
+					"email_address":     email,
+					"first_name":        firstName,
+					"last_name":         lastName,
+					"phone_number":      phoneNumber,
+					"is_active":         contact.IsActive,
+					"tags":              contact.Tags,
+					"custom_attributes": contact.CustomAttributes,
+				},
 			}, nil
 		},
 		workflow.ActivityMeta{
 			Category:    "ClickFunnels",
-			Description: "Fetches a ClickFunnels contact by numeric ID from the workflow context",
+			Description: "Fetches a ClickFunnels contact by numeric ID. Result is stored under result_var (default: \"contact\"). On failure, result_var.error and result_var.status=\"error\" are set instead of failing the workflow.",
 			InputFields: []workflow.FieldMeta{
 				{Name: "contact_id", Type: "number", Description: "Numeric ClickFunnels contact ID", Required: true},
+				{Name: "result_var", Type: "string", Description: "Context key to store the result under (default: \"contact\")"},
 			},
 			OutputFields: []workflow.FieldMeta{
-				{Name: "cf_id", Type: "number", Description: "ClickFunnels contact ID"},
-				{Name: "cf_public_id", Type: "string", Description: "ClickFunnels public ID"},
-				{Name: "email_address", Type: "string"},
-				{Name: "first_name", Type: "string"},
-				{Name: "last_name", Type: "string"},
-				{Name: "phone_number", Type: "string"},
-				{Name: "is_active", Type: "bool"},
-				{Name: "tags", Type: "any", Description: "Array of tag objects"},
-				{Name: "custom_attributes", Type: "object"},
+				{Name: "contact", Type: "object", Description: "Contact data object (or error object) stored under result_var. Contains: status, cf_id, cf_public_id, email_address, first_name, last_name, phone_number, is_active, tags, custom_attributes. On error: status=\"error\", error=\"<message>\"."},
 			},
 		},
 	)
