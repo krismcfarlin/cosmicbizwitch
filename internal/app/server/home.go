@@ -18,7 +18,7 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 
 	bodyHTML := `
 <header>
-    <h1>Platform Starter</h1>
+    <h1>CosmicBizWitch</h1>
     <a href="/logout" class="logout-btn">Logout</a>
 </header>
 <div class="container">
@@ -69,5 +69,5 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
 </div>`
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, baseTemplate("Platform Starter", bodyHTML))
+	fmt.Fprint(w, baseTemplate("CosmicBizWitch", bodyHTML))
 }

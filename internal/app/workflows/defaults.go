@@ -1083,6 +1083,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 	)
 
 	init_birth_converters(eng)
+	registerLLMActivity(eng, app)
 }
 
 // ── format_birth_date ─────────────────────────────────────────────────────────

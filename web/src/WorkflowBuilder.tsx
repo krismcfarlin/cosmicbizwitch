@@ -46,6 +46,33 @@ function parseVal(s: string): unknown {
   return s
 }
 
+// ── LLM model list ────────────────────────────────────────────────────────────
+const LLM_MODELS = [
+  { group: 'Anthropic (Direct)', models: [
+    { value: 'anthropic/claude-opus-4-6', label: 'Claude Opus 4.6' },
+    { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+    { value: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5' },
+  ]},
+  { group: 'OpenRouter — Anthropic', models: [
+    { value: 'openrouter/anthropic/claude-opus-4', label: 'Claude Opus 4 (OR)' },
+    { value: 'openrouter/anthropic/claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (OR)' },
+    { value: 'openrouter/anthropic/claude-3-5-haiku', label: 'Claude 3.5 Haiku (OR)' },
+  ]},
+  { group: 'OpenRouter — OpenAI', models: [
+    { value: 'openrouter/openai/gpt-4o', label: 'GPT-4o (OR)' },
+    { value: 'openrouter/openai/gpt-4o-mini', label: 'GPT-4o Mini (OR)' },
+  ]},
+  { group: 'OpenRouter — Google', models: [
+    { value: 'openrouter/google/gemini-2.0-flash-001', label: 'Gemini 2.0 Flash (OR)' },
+    { value: 'openrouter/google/gemini-2.5-pro-preview-06-05', label: 'Gemini 2.5 Pro (OR)' },
+  ]},
+  { group: 'OpenRouter — Other', models: [
+    { value: 'openrouter/meta-llama/llama-3.3-70b-instruct', label: 'Llama 3.3 70B (OR)' },
+    { value: 'openrouter/deepseek/deepseek-r1', label: 'DeepSeek R1 (OR)' },
+    { value: 'openrouter/mistralai/mistral-large', label: 'Mistral Large (OR)' },
+  ]},
+]
+
 // ── ActivityCard (sidebar item) ───────────────────────────────────────────────
 
 function ActivityCard({ info, onDragStart }: { info: ActivityInfo; onDragStart: (name: string) => void }) {
@@ -1421,12 +1448,13 @@ function fmtVal(v: unknown): string {
   return JSON.stringify(v)
 }
 
-function HttpBodyBuilderModal({ existingBody, onSave, onClose }: {
+function HttpBodyBuilderModal({ existingBody, onSave, onClose, defaultSourceJson = '' }: {
   existingBody: string
   onSave: (body: string) => void
   onClose: () => void
+  defaultSourceJson?: string
 }) {
-  const [sourceText, setSourceText] = useState('')
+  const [sourceText, setSourceText] = useState(defaultSourceJson)
   const [bodyText, setBodyText] = useState(existingBody)
   const [sourcePaths, setSourcePaths] = useState<string[]>([])
   const [sourceParseError, setSourceParseError] = useState('')
@@ -1438,6 +1466,18 @@ function HttpBodyBuilderModal({ existingBody, onSave, onClose }: {
   const [bodyLeaves, setBodyLeaves] = useState<Array<{ path: string; value: unknown }>>([])
   const [dragOverPath, setDragOverPath] = useState<string | null>(null)
   const dragRef = useRef<string>('')
+
+  // Auto-parse defaultSourceJson when it changes (e.g. debug context passed in)
+  useEffect(() => {
+    if (!defaultSourceJson || defaultSourceJson.trim() === '' || defaultSourceJson.trim() === '{}') return
+    try {
+      const parsed = JSON.parse(defaultSourceJson)
+      const out: string[] = []
+      collectLeafPaths(parsed, '', 0, out)
+      setSourcePaths(out.filter(p => p !== ''))
+      setSourceParseError('')
+    } catch { /* invalid JSON - ignore */ }
+  }, [defaultSourceJson])
 
   // Parse source JSON into leaf paths
   const parseSource = () => {
@@ -1714,6 +1754,14 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
   const [mapperDestJson, setMapperDestJson] = useState('')
   const [showMapperModal, setShowMapperModal] = useState(false)
 
+  // Auto-populate mapper source from debugContext once when it becomes non-empty
+  useEffect(() => {
+    if (debugContext && debugContext.trim() !== '{}' && !mapperSourceJson.trim()) {
+      setMapperSourceJson(debugContext)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debugContext])
+
   // HTTP Body Builder state
   const [showHttpBodyBuilder, setShowHttpBodyBuilder] = useState(false)
   const [showPbDataMapper, setShowPbDataMapper] = useState(false)
@@ -1743,6 +1791,7 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
   const isPbQuery = node.activityName === 'pb_query'
   const isHttpRequest = node.activityName === 'http_request'
   const isMapper = node.activityName === 'mapper'
+  const isLlm = node.activityName === 'llm_prompt'
 
   // Parse validity for mapper button enable
   const mapperSourceValid = (() => { try { JSON.parse(mapperSourceJson); return mapperSourceJson.trim() !== ''; } catch { return false } })()
@@ -1840,7 +1889,84 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
         </>
       )}
 
-      {!isPython && !isMapper && !isPbQuery && inputFields.length > 0 && (
+      {isLlm && (
+        <>
+          <div style={{ marginTop: '14px', marginBottom: '6px', fontSize: '11px', fontWeight: 700, color: '#444', borderTop: '1px solid #e0e6ed', paddingTop: '10px' }}>
+            LLM Prompt
+          </div>
+
+          <label style={labelStyle}>Model <span style={{ color: '#e74c3c' }}>*</span></label>
+          <select
+            value={(node.staticInput ?? {}).model ?? ''}
+            onChange={e => setInput('model', e.target.value)}
+            style={{ ...inputStyle, background: 'white' }}
+          >
+            <option value="">— select a model —</option>
+            {LLM_MODELS.map(g => (
+              <optgroup key={g.group} label={g.group}>
+                {g.models.map(m => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
+
+          <label style={labelStyle}>System Prompt</label>
+          <textarea
+            value={(node.staticInput ?? {}).system_prompt ?? ''}
+            onChange={e => setInput('system_prompt', e.target.value)}
+            rows={3}
+            placeholder="You are a helpful assistant..."
+            spellCheck={false}
+            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '5px 7px', border: '1px solid #e0e6ed', borderRadius: '4px', resize: 'vertical', marginBottom: '2px' }}
+          />
+
+          <label style={labelStyle}>Prompt <span style={{ color: '#e74c3c' }}>*</span></label>
+          <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>Supports {'{{key}}'} template interpolation</div>
+          <textarea
+            value={(node.staticInput ?? {}).prompt ?? ''}
+            onChange={e => setInput('prompt', e.target.value)}
+            rows={4}
+            placeholder={'Summarize this contact: {{contact.first_name}} {{contact.last_name}}'}
+            spellCheck={false}
+            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '5px 7px', border: '1px solid #e0e6ed', borderRadius: '4px', resize: 'vertical', marginBottom: '2px' }}
+          />
+
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ flex: 1 }}>
+              <label style={labelStyle}>Temperature</label>
+              <input
+                type="number" min={0} max={2} step={0.1}
+                value={(node.staticInput ?? {}).temperature ?? '0.7'}
+                onChange={e => setInput('temperature', e.target.value)}
+                style={inputStyle}
+                placeholder="0.7"
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={labelStyle}>Max Tokens</label>
+              <input
+                type="number" min={1}
+                value={(node.staticInput ?? {}).max_tokens ?? '1024'}
+                onChange={e => setInput('max_tokens', e.target.value)}
+                style={inputStyle}
+                placeholder="1024"
+              />
+            </div>
+          </div>
+
+          <label style={labelStyle}>Result Key</label>
+          <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>Store response under this context key (default: llm_response)</div>
+          <input
+            value={(node.staticInput ?? {}).result_key ?? ''}
+            onChange={e => setInput('result_key', e.target.value)}
+            style={inputStyle}
+            placeholder="llm_response"
+          />
+        </>
+      )}
+
+      {!isPython && !isMapper && !isLlm && !isPbQuery && inputFields.length > 0 && (
         <>
           <div style={{ marginTop: '14px', marginBottom: '6px', fontSize: '11px', fontWeight: 700, color: '#444', borderTop: '1px solid #e0e6ed', paddingTop: '10px' }}>
             Input Fields
@@ -2053,6 +2179,7 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
       {isHttpRequest && showHttpBodyBuilder && (
         <HttpBodyBuilderModal
           existingBody={(node.staticInput ?? {}).body ?? ''}
+          defaultSourceJson={debugContext}
           onSave={body => {
             setInput('body', body)
             setShowHttpBodyBuilder(false)
@@ -2177,7 +2304,7 @@ export default function WorkflowBuilder() {
   const [debugHeight, setDebugHeight] = useState(300)
   const [debugContext, setDebugContext] = useState('{}')
   const [debugNodeIdx, setDebugNodeIdx] = useState(0)
-  const [debugResults, setDebugResults] = useState<Array<{nodeId: string; activityName: string; output?: unknown; error?: string}>>([])
+  const [debugResults, setDebugResults] = useState<Array<{nodeId: string; activityName: string; output?: unknown; error?: string; skipped?: boolean}>>([])
   const [debugRunning, setDebugRunning] = useState(false)
   const [debugResetKey, setDebugResetKey] = useState(0)
   const [debugCopied, setDebugCopied] = useState(false)
@@ -2579,7 +2706,7 @@ export default function WorkflowBuilder() {
       mergedInput[k] = resolveTemplates(parsed, input)
     }
 
-    let data: { output?: unknown; error?: string } = {}
+    let data: { output?: unknown; error?: string; skipped?: boolean } = {}
     try {
       const resp = await fetch('/api/workflows/execute-node', {
         method: 'POST',
@@ -2596,6 +2723,13 @@ export default function WorkflowBuilder() {
       data = { error: String(e) }
     }
 
+    if (data.skipped) {
+      setDebugResults(prev => [...prev, { nodeId: node.id, activityName: node.activityName, output: input, skipped: true }])
+      setDebugNodeIdx(i => i + 1)
+      setDebugRunning(false)
+      return
+    }
+
     let mergedCtx = { ...input }
     if (!data.error && data.output && typeof data.output === 'object') {
       mergedCtx = { ...mergedCtx, ...(data.output as Record<string, unknown>) }
@@ -2606,9 +2740,9 @@ export default function WorkflowBuilder() {
       try {
         setDebugContext(JSON.stringify(mergedCtx, null, 2))
       } catch { /* keep as-is */ }
+      setDebugNodeIdx(i => i + 1)
     }
 
-    setDebugNodeIdx(i => i + 1)
     setDebugRunning(false)
   }, [debugNodeIdx, debugContext, debugNodes, enrichContextForNode])
 
@@ -2633,7 +2767,7 @@ export default function WorkflowBuilder() {
         mergedInput[k] = resolveTemplates(parsed, input)
       }
 
-      let data: { output?: unknown; error?: string } = {}
+      let data: { output?: unknown; error?: string; skipped?: boolean } = {}
       try {
         const resp = await fetch('/api/workflows/execute-node', {
           method: 'POST',
@@ -2650,6 +2784,15 @@ export default function WorkflowBuilder() {
         data = { error: String(e) }
       }
 
+      if (data.skipped) {
+        results = [...results, { nodeId: node.id, activityName: node.activityName, output: input, skipped: true }]
+        idx = i + 1
+        setDebugResults(results)
+        setDebugNodeIdx(idx)
+        await new Promise(r => setTimeout(r, 300))
+        continue
+      }
+
       let mergedCtxObj = { ...input }
       if (!data.error && data.output && typeof data.output === 'object') {
         mergedCtxObj = { ...mergedCtxObj, ...(data.output as Record<string, unknown>) }
@@ -2657,7 +2800,10 @@ export default function WorkflowBuilder() {
       }
 
       results = [...results, { nodeId: node.id, activityName: node.activityName, output: mergedCtxObj, error: data.error }]
-      idx = i + 1
+
+      if (!data.error) {
+        idx = i + 1
+      }
 
       setDebugResults(results)
       setDebugContext(ctx)
@@ -3107,7 +3253,11 @@ export default function WorkflowBuilder() {
                 </div>
                 <div style={{ flex: 1, overflowY: 'auto', fontFamily: 'monospace', fontSize: '11px', lineHeight: 1.5 }}>
                   {lastDebugResult ? (
-                    lastDebugResult.error ? (
+                    lastDebugResult.skipped ? (
+                      <div style={{ color: '#fbbf24', whiteSpace: 'pre-wrap' }}>
+                        Skipped: {lastDebugResult.activityName} (node returned ErrSkip — context unchanged)
+                      </div>
+                    ) : lastDebugResult.error ? (
                       <div style={{ color: '#f87171', whiteSpace: 'pre-wrap' }}>
                         Error in {lastDebugResult.activityName}:{'\n'}{lastDebugResult.error}
                       </div>
@@ -3153,6 +3303,35 @@ export default function WorkflowBuilder() {
                   </button>
                 </>
               )}
+              <button
+                onClick={() => {
+                  if (debugNodeIdx > 0) {
+                    setDebugNodeIdx(debugNodeIdx - 1)
+                    setDebugResults(prev => prev.slice(0, -1))
+                  }
+                }}
+                disabled={debugRunning || debugNodeIdx === 0}
+                style={{ ...iconBtn('#374151'), opacity: (debugRunning || debugNodeIdx === 0) ? 0.5 : 1, fontSize: '12px', padding: '4px 8px' }}
+              >
+                ← Back
+              </button>
+              <select
+                value={debugNodeIdx}
+                onChange={e => {
+                  const idx = Number(e.target.value)
+                  setDebugNodeIdx(idx)
+                  setDebugResults(prev => prev.slice(0, idx))
+                }}
+                disabled={debugRunning}
+                style={{ fontSize: '11px', padding: '3px 6px', background: '#2d2d4e', color: '#9b8fd4', border: '1px solid #4a4a6a', borderRadius: '4px', cursor: 'pointer' }}
+              >
+                {debugNodes.map((n, i) => (
+                  <option key={n.id} value={i}>{i + 1}. {n.activityName}</option>
+                ))}
+                {debugNodes.length > 0 && (
+                  <option value={debugNodes.length}>Done</option>
+                )}
+              </select>
               <button
                 onClick={() => { setDebugNodeIdx(0); setDebugResults([]); setDebugResetKey(k => k + 1) }}
                 disabled={debugRunning}

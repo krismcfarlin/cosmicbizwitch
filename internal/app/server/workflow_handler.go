@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -241,6 +242,12 @@ func (s *Server) handleExecuteNode(w http.ResponseWriter, r *http.Request) {
 	}
 	s.logger.Printf("execute-node: activity=%q input_keys=%v", req.Activity, inputKeys(req.Input))
 	output, err := s.engine.ExecuteActivity(r.Context(), req.Activity, req.Input)
+	if errors.Is(err, workflow.ErrSkip) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]any{"output": map[string]any{}, "skipped": true})
+		return
+	}
 	if err != nil {
 		s.logger.Printf("execute-node: activity=%q error: %v", req.Activity, err)
 		w.Header().Set("Content-Type", "application/json")
