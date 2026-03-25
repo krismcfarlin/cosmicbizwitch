@@ -58,6 +58,13 @@ func (s *Server) handleHome(w http.ResponseWriter, r *http.Request) {
                 <p style="color: #888; font-size: 13px; margin-top: 8px;">Generic PocketBase CRUD tools for LLM agents</p>
             </div>
         </a>
+        <a href="/settings" style="text-decoration: none;">
+            <div class="stat-card" style="cursor: pointer; transition: box-shadow 0.2s;" onmouseover="this.style.boxShadow='0 4px 16px rgba(102,126,234,0.3)'" onmouseout="this.style.boxShadow=''">
+                <h3>Settings</h3>
+                <div class="value" style="font-size: 20px; margin-top: 12px; color: #6b46c1;">/settings</div>
+                <p style="color: #888; font-size: 13px; margin-top: 8px;">API keys and application configuration</p>
+            </div>
+        </a>
         <a href="/health" style="text-decoration: none;">
             <div class="stat-card" style="cursor: pointer; transition: box-shadow 0.2s;" onmouseover="this.style.boxShadow='0 4px 16px rgba(102,126,234,0.3)'" onmouseout="this.style.boxShadow=''">
                 <h3>Health Check</h3>

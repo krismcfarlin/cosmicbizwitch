@@ -109,6 +109,7 @@ export default function Settings() {
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <h1 style={{ fontSize: '20px', color: '#6b46c1', fontWeight: 600, margin: 0 }}>Settings</h1>
         <div style={{ display: 'flex', gap: '10px' }}>
+          <a href="/" style={navBtn('#667eea')}>Home</a>
           <button onClick={() => navigate('/workflows')} style={navBtn('#667eea')}>Workflows</button>
           <button onClick={() => navigate('/triggers')} style={navBtn('#667eea')}>Triggers</button>
           <a href="/logs" style={navBtn('#667eea')}>Logs</a>

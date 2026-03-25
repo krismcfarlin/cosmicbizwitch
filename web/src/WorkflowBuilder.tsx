@@ -1948,6 +1948,32 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debugContext])
 
+  // LLM model list — fetched dynamically from /api/llm/models, falls back to static
+  const [llmModels, setLlmModels] = useState<Array<{ group: string; models: Array<{ value: string; label: string }> }>>([])
+  const [llmModelsLoading, setLlmModelsLoading] = useState(false)
+  // state for the "add from context" dropdown in the prompt vars mapper
+  const [llmAddVarCtxKey, setLlmAddVarCtxKey] = useState('')
+
+  const fetchLlmModels = useCallback(async () => {
+    setLlmModelsLoading(true)
+    try {
+      const res = await fetch('/api/llm/models')
+      if (res.ok) {
+        const data = await res.json()
+        if (data.groups?.length) setLlmModels(data.groups)
+      }
+    } catch {
+      // fall back to static list
+    } finally {
+      setLlmModelsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (node.activityName === 'llm_prompt' && llmModels.length === 0) fetchLlmModels()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.activityName])
+
   // HTTP Body Builder state
   const [showHttpBodyBuilder, setShowHttpBodyBuilder] = useState(false)
   const [showPbDataMapper, setShowPbDataMapper] = useState(false)
@@ -2081,14 +2107,24 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
             LLM Prompt
           </div>
 
-          <label style={labelStyle}>Model <span style={{ color: '#e74c3c' }}>*</span></label>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2px' }}>
+            <label style={{ ...labelStyle, marginBottom: 0 }}>Model <span style={{ color: '#e74c3c' }}>*</span></label>
+            <button
+              onClick={fetchLlmModels}
+              disabled={llmModelsLoading}
+              title="Refresh model list from API keys configured in Settings"
+              style={{ fontSize: '10px', padding: '2px 7px', border: '1px solid #d0d5dd', borderRadius: '4px', background: 'white', cursor: llmModelsLoading ? 'default' : 'pointer', color: '#555' }}
+            >
+              {llmModelsLoading ? '...' : '↻ Refresh'}
+            </button>
+          </div>
           <select
             value={(node.staticInput ?? {}).model ?? ''}
             onChange={e => setInput('model', e.target.value)}
-            style={{ ...inputStyle, background: 'white' }}
+            style={{ ...inputStyle, background: 'white', marginBottom: '4px' }}
           >
-            <option value="">— select a model —</option>
-            {LLM_MODELS.map(g => (
+            <option value="">— pick from list —</option>
+            {(llmModels.length > 0 ? llmModels : LLM_MODELS).map(g => (
               <optgroup key={g.group} label={g.group}>
                 {g.models.map(m => (
                   <option key={m.value} value={m.value}>{m.label}</option>
@@ -2096,13 +2132,114 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
               </optgroup>
             ))}
           </select>
+          <input
+            value={(node.staticInput ?? {}).model ?? ''}
+            onChange={e => setInput('model', e.target.value)}
+            style={{ ...inputStyle, fontFamily: 'monospace', fontSize: '11px' }}
+            placeholder="or type ID: openrouter/minimax/minimax-text-01"
+          />
+
+          {/* ── Prompt Variables Mapper ── */}
+          {(() => {
+            const rawVars = (node.staticInput ?? {}).prompt_vars
+            const promptVars: Record<string, string> = (() => {
+              try { return rawVars ? JSON.parse(rawVars) : {} } catch { return {} }
+            })()
+            const contextPaths: string[] = (() => {
+              try {
+                const ctx = JSON.parse(debugContext || '{}')
+                const out: string[] = []
+                collectLeafPaths(ctx, '', 0, out)
+                return out.filter(p => p !== '' && !p.startsWith('_'))
+              } catch { return [] }
+            })()
+            const rows = Object.entries(promptVars)
+            const saveVars = (vars: Record<string, string>) =>
+              setInput('prompt_vars', JSON.stringify(vars))
+            const addBlankRow = () => {
+              const key = `var${rows.length + 1}`
+              saveVars({ ...promptVars, [key]: '' })
+            }
+            const addFromCtx = (ctxPath: string) => {
+              if (!ctxPath) return
+              // derive a clean var name from the last path segment
+              const lastSeg = ctxPath.split('.').pop() ?? ctxPath
+              const varName = lastSeg.replace(/[^a-zA-Z0-9_]/g, '_')
+              const key = promptVars[varName] !== undefined ? ctxPath.replace(/\./g, '_') : varName
+              saveVars({ ...promptVars, [key]: `{{${ctxPath}}}` })
+              setLlmAddVarCtxKey('')
+            }
+            const removeRow = (k: string) => {
+              const next = { ...promptVars }
+              delete next[k]
+              saveVars(next)
+            }
+            const updateKey = (oldKey: string, newKey: string) => {
+              const next: Record<string, string> = {}
+              for (const [k, v] of Object.entries(promptVars)) {
+                next[k === oldKey ? newKey : k] = v
+              }
+              saveVars(next)
+            }
+            const updateVal = (key: string, val: string) =>
+              saveVars({ ...promptVars, [key]: val })
+            return (
+              <div style={{ marginTop: '10px', marginBottom: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
+                  <span style={{ fontSize: '11px', fontWeight: 700, color: '#444' }}>
+                    Prompt Variables
+                  </span>
+                  <span style={{ fontSize: '10px', color: '#aaa' }}>maps context → {'{{var}}'} in prompt</span>
+                </div>
+                {rows.map(([k, v]) => (
+                  <div key={k} style={{ display: 'flex', gap: '4px', alignItems: 'center', marginBottom: '3px' }}>
+                    <input
+                      value={k}
+                      onChange={e => updateKey(k, e.target.value)}
+                      title="Variable name used in prompt as {{name}}"
+                      style={{ ...inputStyle, flex: '0 0 90px', fontFamily: 'monospace', fontSize: '10px', marginBottom: 0 }}
+                      placeholder="var name"
+                    />
+                    <span style={{ color: '#bbb', fontSize: '10px', flexShrink: 0 }}>→</span>
+                    <input
+                      value={v}
+                      onChange={e => updateVal(k, e.target.value)}
+                      title="Value — use {{context_key}} to pull from workflow context"
+                      style={{ ...inputStyle, flex: 1, fontFamily: 'monospace', fontSize: '10px', marginBottom: 0 }}
+                      placeholder="{{context_key}}"
+                    />
+                    <button onClick={() => removeRow(k)} style={{ flexShrink: 0, border: 'none', background: 'none', color: '#e74c3c', cursor: 'pointer', fontSize: '15px', padding: '0 2px', lineHeight: 1 }}>×</button>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', gap: '5px', marginTop: '4px' }}>
+                  {contextPaths.length > 0 && (
+                    <select
+                      value={llmAddVarCtxKey}
+                      onChange={e => addFromCtx(e.target.value)}
+                      style={{ ...inputStyle, flex: 1, fontSize: '10px', marginBottom: 0 }}
+                    >
+                      <option value="">+ from context…</option>
+                      {contextPaths.map(p => (
+                        <option key={p} value={p}>{p}</option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    onClick={addBlankRow}
+                    style={{ flexShrink: 0, fontSize: '10px', padding: '3px 8px', border: '1px solid #d0d5dd', borderRadius: '4px', background: 'white', cursor: 'pointer', color: '#555' }}
+                  >+ Add</button>
+                </div>
+              </div>
+            )
+          })()}
 
           <label style={labelStyle}>System Prompt</label>
+          <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>Supports {'{{key}}'} and prompt variable interpolation</div>
           <textarea
             value={(node.staticInput ?? {}).system_prompt ?? ''}
             onChange={e => setInput('system_prompt', e.target.value)}
             rows={3}
-            placeholder="You are a helpful assistant..."
+            placeholder="You are a helpful assistant analyzing {{contact.first_name}}..."
             spellCheck={false}
             style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '5px 7px', border: '1px solid #e0e6ed', borderRadius: '4px', resize: 'vertical', marginBottom: '2px' }}
           />
