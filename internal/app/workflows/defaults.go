@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"cosmicbizwitch/internal/app/clickfunnels"
+	googleapp "cosmicbizwitch/internal/app/google"
 	"cosmicbizwitch/pkg/workflow"
 
 	"github.com/pocketbase/dbx"
@@ -22,8 +23,10 @@ import (
 )
 
 // RegisterDefaults wires up built-in demo activities and graphs into the engine.
-func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client) error {
+func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client, getGoogle func() *googleapp.Client) error {
 	registerActivities(eng, app, getCF)
+	registerGoogleActivities(eng, getGoogle)
+	registerTemplateFill(eng)
 	return registerGraphs(eng, getCF)
 }
 
@@ -1196,6 +1199,50 @@ func resolveDotPath(obj map[string]any, path string) any {
 		return nil
 	}
 	return resolveDotPath(nested, parts[1])
+}
+
+// ── template_fill ─────────────────────────────────────────────────────────────
+
+func registerTemplateFill(eng *workflow.Engine) {
+	eng.RegisterActivityWithMeta("template_fill",
+		func(_ context.Context, input map[string]any) (map[string]any, error) {
+			tmpl, _ := input["template"].(string)
+			if tmpl == "" {
+				return nil, fmt.Errorf("template_fill: template is required")
+			}
+			resultVar, _ := input["result_var"].(string)
+			if resultVar == "" {
+				resultVar = "filled_content"
+			}
+
+			// Replace {{key}} tokens using all string-valued context entries.
+			// The workflow engine already interpolated any {{var}} reference in
+			// the template field itself, so tmpl now contains the actual template
+			// text with {{placeholder}} tokens waiting to be filled.
+			skip := map[string]bool{"template": true, "result_var": true}
+			result := tmpl
+			for k, v := range input {
+				if skip[k] || len(k) == 0 || k[0] == '_' {
+					continue
+				}
+				if s, ok := v.(string); ok {
+					result = strings.ReplaceAll(result, "{{"+k+"}}", s)
+				}
+			}
+			return map[string]any{resultVar: result}, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "Utility",
+			Description: "Fills a text template by replacing {{placeholder}} tokens with workflow context values. Set template to {{var_name}} to use a variable fetched earlier (e.g. from gdrive_get_file).",
+			InputFields: []workflow.FieldMeta{
+				{Name: "template", Type: "string", Required: true, Description: "Template text with {{placeholder}} tokens, or {{var_name}} to pull content from a context variable."},
+				{Name: "result_var", Type: "string", Description: "Variable name to store the filled result in. Defaults to filled_content."},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "<result_var>", Type: "string", Description: "The filled template text, stored under the name provided in result_var (default: filled_content)."},
+			},
+		},
+	)
 }
 
 // ── Graphs ────────────────────────────────────────────────────────────────────
