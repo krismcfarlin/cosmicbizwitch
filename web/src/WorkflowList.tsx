@@ -133,6 +133,7 @@ export default function WorkflowList() {
           <button onClick={() => navigate('/workflows/builder')} style={navBtn('#9b59b6')}>+ New Workflow</button>
           <button onClick={openCreateModal} style={navBtn('#27ae60')}>▶ Run</button>
           <button onClick={() => navigate('/triggers')} style={navBtn('#e67e22')}>Triggers</button>
+          <button onClick={() => navigate('/settings')} style={navBtn('#6b46c1')}>Settings</button>
           <a href="/logs" style={navBtn('#667eea')}>Logs</a>
           <a href="/_/" style={navBtn('#667eea')}>Admin</a>
           <a href="/logout" style={navBtn('#e74c3c')}>Logout</a>

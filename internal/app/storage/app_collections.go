@@ -234,6 +234,7 @@ func seedAppSettings(app core.App, logger *log.Logger) error {
 		{"CF_WORKSPACE_ID", "ClickFunnels Workspace ID", "Your ClickFunnels workspace ID", false, ""},
 		{"OPENROUTER_API_KEY", "OpenRouter API Key", "API key from openrouter.ai — enables access to many models via one key", true, ""},
 		{"ANTHROPIC_API_KEY", "Anthropic API Key", "API key from console.anthropic.com — for direct Anthropic API access", true, ""},
+		{"OPENAI_API_KEY", "OpenAI API Key", "API key from platform.openai.com — for direct OpenAI API access", true, ""},
 	}
 
 	col, err := app.FindCollectionByNameOrId("app_settings")

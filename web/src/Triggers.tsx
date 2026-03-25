@@ -148,6 +148,7 @@ export default function Triggers() {
         <div style={{ display: 'flex', gap: '10px' }}>
           <button onClick={openCreate} style={navBtn('#27ae60')}>+ New Trigger</button>
           <button onClick={() => navigate('/workflows')} style={navBtn('#667eea')}>Workflows</button>
+          <button onClick={() => navigate('/settings')} style={navBtn('#6b46c1')}>Settings</button>
           <a href="/logs" style={navBtn('#667eea')}>Logs</a>
           <a href="/logout" style={navBtn('#e74c3c')}>Logout</a>
         </div>

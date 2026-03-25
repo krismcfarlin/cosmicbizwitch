@@ -107,6 +107,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/workflows/graphs", s.requireAuth(s.handleGraphSave))
 	mux.HandleFunc("POST /api/workflows/execute-node", s.requireAuth(s.handleExecuteNode))
 	mux.HandleFunc("GET /api/pb/collections/{name}/fields", s.requireAuth(s.handlePbCollectionFields))
+	mux.HandleFunc("GET /api/llm/models", s.requireAuth(s.handleLLMModels))
 	mux.HandleFunc("GET /api/workflows/{id}", s.requireAuth(s.handleWorkflowGet))
 	mux.HandleFunc("GET /api/workflows/{id}/activities", s.requireAuth(s.handleWorkflowActivities))
 	mux.HandleFunc("GET /api/workflows", s.requireAuth(s.handleWorkflowList))

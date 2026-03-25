@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"regexp"
@@ -22,14 +23,14 @@ import (
 )
 
 // RegisterDefaults wires up built-in demo activities and graphs into the engine.
-func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client) error {
-	registerActivities(eng, app, getCF)
+func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client, logger *log.Logger) error {
+	registerActivities(eng, app, getCF, logger)
 	return registerGraphs(eng, getCF)
 }
 
 // ── Activities ────────────────────────────────────────────────────────────────
 
-func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client) {
+func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client, logger *log.Logger) {
 	// test_data: injects a static JSON payload into the workflow context for debugging.
 	// When the workflow was started by a real trigger (_source == "trigger"), this
 	// node is skipped so live data is used instead.
@@ -1083,7 +1084,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 	)
 
 	init_birth_converters(eng)
-	registerLLMActivity(eng, app)
+	registerLLMActivity(eng, app, logger)
 }
 
 // ── format_birth_date ─────────────────────────────────────────────────────────
