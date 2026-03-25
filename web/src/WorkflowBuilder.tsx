@@ -3,9 +3,10 @@ import { useNavigate } from 'react-router-dom'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-interface FieldMeta { name: string; type: string; description: string }
+interface FieldMeta { name: string; type: string; description: string; required?: boolean; options?: string[] }
 interface ActivityMeta { description: string; category?: string; input_fields: FieldMeta[]; output_fields: FieldMeta[] }
 interface ActivityInfo { name: string; meta: ActivityMeta }
+interface DriveItem { id: string; name: string; type: 'folder' | 'file'; mime_type?: string; is_folder?: boolean }
 
 interface BNode {
   id: string
@@ -1448,6 +1449,191 @@ function fmtVal(v: unknown): string {
   return JSON.stringify(v)
 }
 
+// ── DrivePicker ───────────────────────────────────────────────────────────────
+
+interface DrivePickerProps {
+  value: string
+  displayName: string
+  mode: 'folder' | 'file'
+  onSelect: (id: string, name: string) => void
+}
+
+function DrivePicker({ value, displayName, mode, onSelect }: DrivePickerProps) {
+  const [open, setOpen] = useState(false)
+  const [items, setItems] = useState<DriveItem[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [breadcrumb, setBreadcrumb] = useState<Array<{ id: string; name: string }>>([{ id: '', name: 'My Drive' }])
+
+  const currentParent = breadcrumb[breadcrumb.length - 1]
+
+  const loadFolder = async (parentId: string) => {
+    setLoading(true)
+    setError('')
+    try {
+      const url = parentId
+        ? `/api/google/drive/browse?parent=${encodeURIComponent(parentId)}`
+        : '/api/google/drive/browse'
+      const res = await fetch(url, { credentials: 'include' })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+      setItems((data || []).map((f: any) => ({
+        id: f.id,
+        name: f.name,
+        type: f.is_folder ? 'folder' : 'file',
+        mime_type: f.mimeType || f.mime_type,
+      })))
+    } catch (e: any) {
+      setError(e.message || 'Failed to load Drive files')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const openModal = () => {
+    setOpen(true)
+    setBreadcrumb([{ id: '', name: 'My Drive' }])
+    loadFolder('')
+  }
+
+  const navigateInto = (item: DriveItem) => {
+    if (item.type !== 'folder') return
+    const newCrumb = [...breadcrumb, { id: item.id, name: item.name }]
+    setBreadcrumb(newCrumb)
+    loadFolder(item.id)
+  }
+
+  const navigateTo = (idx: number) => {
+    const newCrumb = breadcrumb.slice(0, idx + 1)
+    setBreadcrumb(newCrumb)
+    loadFolder(breadcrumb[idx].id)
+  }
+
+  const selectFolder = () => {
+    onSelect(currentParent.id, currentParent.name)
+    setOpen(false)
+  }
+
+  const selectFile = (item: DriveItem) => {
+    onSelect(item.id, item.name)
+    setOpen(false)
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+        <div style={{
+          flex: 1, padding: '5px 8px', background: '#f8fafc', border: '1px solid #ddd',
+          borderRadius: '4px', fontSize: '12px', color: value ? '#333' : '#999',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>
+          {displayName ? `${mode === 'folder' ? '📁' : '📄'} ${displayName}` : '— not selected —'}
+        </div>
+        <button
+          onClick={openModal}
+          style={{
+            padding: '5px 10px', background: '#0369a1', color: 'white',
+            border: 'none', borderRadius: '4px', fontSize: '11px', cursor: 'pointer',
+            whiteSpace: 'nowrap', fontWeight: 600,
+          }}
+        >
+          Browse
+        </button>
+      </div>
+
+      {open && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+            zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onClick={e => { if (e.target === e.currentTarget) setOpen(false) }}
+        >
+          <div style={{
+            background: 'white', borderRadius: '8px', width: '520px', maxHeight: '520px',
+            display: 'flex', flexDirection: 'column', boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          }}>
+            {/* Header */}
+            <div style={{ padding: '14px 16px', borderBottom: '1px solid #e0e6ed', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontWeight: 700, fontSize: '13px' }}>
+                {mode === 'folder' ? 'Select a Folder' : 'Select a File'}
+              </span>
+              <button onClick={() => setOpen(false)} style={{ background: 'none', border: 'none', fontSize: '16px', cursor: 'pointer', color: '#666' }}>✕</button>
+            </div>
+
+            {/* Breadcrumb */}
+            <div style={{ padding: '8px 16px', borderBottom: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', gap: '4px', flexWrap: 'wrap' }}>
+              {breadcrumb.map((crumb, idx) => (
+                <span key={idx} style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  {idx > 0 && <span style={{ color: '#aaa', fontSize: '11px' }}>›</span>}
+                  <span
+                    onClick={() => idx < breadcrumb.length - 1 && navigateTo(idx)}
+                    style={{
+                      fontSize: '11px',
+                      color: idx === breadcrumb.length - 1 ? '#333' : '#0369a1',
+                      cursor: idx === breadcrumb.length - 1 ? 'default' : 'pointer',
+                      fontWeight: idx === breadcrumb.length - 1 ? 600 : 400,
+                    }}
+                  >{crumb.name}</span>
+                </span>
+              ))}
+            </div>
+
+            {/* Select this folder button (folder mode, not at root) */}
+            {mode === 'folder' && currentParent.id !== '' && (
+              <div style={{ padding: '8px 16px', borderBottom: '1px solid #f0f0f0' }}>
+                <button
+                  onClick={selectFolder}
+                  style={{
+                    width: '100%', padding: '7px', background: '#16a34a', color: 'white',
+                    border: 'none', borderRadius: '4px', fontSize: '12px', cursor: 'pointer',
+                    fontWeight: 600,
+                  }}
+                >
+                  ✓ Select "{currentParent.name}"
+                </button>
+              </div>
+            )}
+
+            {/* File list */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+              {loading && <div style={{ padding: '20px', textAlign: 'center', color: '#888', fontSize: '12px' }}>Loading...</div>}
+              {error && <div style={{ padding: '12px 16px', color: '#e74c3c', fontSize: '12px' }}>{error}</div>}
+              {!loading && !error && items.length === 0 && (
+                <div style={{ padding: '20px', textAlign: 'center', color: '#aaa', fontSize: '12px' }}>
+                  {mode === 'folder' ? 'No subfolders' : 'Empty folder'}
+                </div>
+              )}
+              {!loading && items.map(item => {
+                const isFolder = item.type === 'folder'
+                if (mode === 'folder' && !isFolder) return null
+                return (
+                  <div
+                    key={item.id}
+                    onClick={() => isFolder ? navigateInto(item) : selectFile(item)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '8px',
+                      padding: '7px 16px', cursor: 'pointer', background: 'transparent',
+                    }}
+                    onMouseEnter={e => { (e.currentTarget as HTMLDivElement).style.background = '#f0f4ff' }}
+                    onMouseLeave={e => { (e.currentTarget as HTMLDivElement).style.background = 'transparent' }}
+                  >
+                    <span style={{ fontSize: '15px' }}>{isFolder ? '📁' : '📄'}</span>
+                    <span style={{ fontSize: '12px', flex: 1 }}>{item.name}</span>
+                    {isFolder && <span style={{ color: '#aaa', fontSize: '11px' }}>›</span>}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── HttpBodyBuilderModal ──────────────────────────────────────────────────────
+
 function HttpBodyBuilderModal({ existingBody, onSave, onClose, defaultSourceJson = '' }: {
   existingBody: string
   onSave: (body: string) => void
@@ -2143,12 +2329,33 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
                   Build Body
                 </button>
               )}
-              <input
-                value={(node.staticInput ?? {})[f.name] ?? ''}
-                onChange={e => setInput(f.name, e.target.value)}
-                style={inputStyle}
-                placeholder={f.type === 'object' ? 'JSON or {{key}}' : `{{${f.name}}} or literal`}
-              />
+              {f.options && f.options.length > 0 ? (
+                <select
+                  value={(node.staticInput ?? {})[f.name] ?? ''}
+                  onChange={e => setInput(f.name, e.target.value)}
+                  style={{ ...inputStyle, background: 'white' }}
+                >
+                  <option value="">— select —</option>
+                  {f.options.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                </select>
+              ) : (f.type === 'gdrive_folder' || f.type === 'gdrive_file') ? (
+                <DrivePicker
+                  value={(node.staticInput ?? {})[f.name] ?? ''}
+                  displayName={(node.staticInput ?? {})[f.name + '_name'] ?? ''}
+                  mode={f.type === 'gdrive_folder' ? 'folder' : 'file'}
+                  onSelect={(id, name) => {
+                    setInput(f.name, id)
+                    setInput(f.name + '_name', name)
+                  }}
+                />
+              ) : (
+                <input
+                  value={(node.staticInput ?? {})[f.name] ?? ''}
+                  onChange={e => setInput(f.name, e.target.value)}
+                  style={inputStyle}
+                  placeholder={f.type === 'object' ? 'JSON or {{key}}' : `{{${f.name}}} or literal`}
+                />
+              )}
             </div>
           ))}
         </>

@@ -21,6 +21,8 @@ export default function Settings() {
   const [rowStates, setRowStates] = useState<Record<string, RowState>>({})
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
+  const [googleConnected, setGoogleConnected] = useState<boolean | null>(null)
+  const [googleConnecting, setGoogleConnecting] = useState(false)
   const navigate = useNavigate()
 
   const load = useCallback(async () => {
@@ -48,6 +50,33 @@ export default function Settings() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  // Check Google Drive connection status on mount.
+  useEffect(() => {
+    fetch('/api/google/auth/status')
+      .then(r => r.json())
+      .then(d => setGoogleConnected(d.connected))
+      .catch(() => setGoogleConnected(false))
+  }, [])
+
+  const connectGoogle = () => {
+    setGoogleConnecting(true)
+    window.open('/api/google/auth/start', '_blank', 'width=520,height=640')
+    // Poll until the OAuth callback saves the refresh token.
+    const interval = setInterval(async () => {
+      try {
+        const r = await fetch('/api/google/auth/status')
+        const d = await r.json()
+        if (d.connected) {
+          setGoogleConnected(true)
+          setGoogleConnecting(false)
+          clearInterval(interval)
+        }
+      } catch { /* ignore */ }
+    }, 2000)
+    // Stop polling after 3 minutes.
+    setTimeout(() => { clearInterval(interval); setGoogleConnecting(false) }, 180000)
+  }
 
   const patchRow = (key: string, patch: Partial<RowState>) => {
     setRowStates(prev => ({ ...prev, [key]: { ...prev[key], ...patch } }))
@@ -88,7 +117,8 @@ export default function Settings() {
         </div>
       </header>
 
-      <div style={{ padding: '20px 24px', maxWidth: '760px' }}>
+      <div style={{ padding: '20px 24px', maxWidth: '760px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        {/* API credentials */}
         <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
           {loading ? (
             <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>Loading...</div>
@@ -144,6 +174,35 @@ export default function Settings() {
               })}
             </div>
           )}
+        </div>
+
+        {/* Google Drive connection */}
+        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', padding: '20px 24px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: '14px', color: '#2c3e50', marginBottom: '4px' }}>Google Drive</div>
+              <div style={{ fontSize: '12px', color: '#888', lineHeight: '1.5' }}>
+                OAuth2 authorization for Google Workspace workflow nodes.<br />
+                Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET above first.
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexShrink: 0, marginLeft: '24px' }}>
+              {googleConnected === null ? (
+                <span style={{ fontSize: '12px', color: '#aaa' }}>Checking...</span>
+              ) : googleConnected ? (
+                <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 600 }}>● Connected</span>
+              ) : (
+                <span style={{ fontSize: '12px', color: '#e74c3c', fontWeight: 500 }}>○ Not connected</span>
+              )}
+              <button
+                onClick={connectGoogle}
+                disabled={googleConnecting}
+                style={saveBtn(googleConnecting)}
+              >
+                {googleConnecting ? 'Waiting for auth...' : googleConnected ? 'Reconnect' : 'Connect Google Drive'}
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
