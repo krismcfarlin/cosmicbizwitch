@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
@@ -280,23 +281,82 @@ func (c *Client) ExportAndSavePDF(ctx context.Context, docID, folderID, filename
 	}, nil
 }
 
-// GetDocContent exports a Drive file's text content.
-// Google Workspace formats (Docs, Sheets, Slides) are exported as plain text via the
-// export API. Regular files are downloaded directly.
+// GetDocContent downloads a Drive file and returns its content as markdown.
+// Native Google Docs use the Docs feed export endpoint with exportFormat=markdown.
+// Office formats (.docx, etc.) are converted to a temp Google Doc, exported, then the temp is deleted.
+// Other Google Workspace types (Sheets, Slides) are exported as plain text.
 func (c *Client) GetDocContent(ctx context.Context, fileID, mimeType string) (string, error) {
-	var rawURL string
-	if strings.HasPrefix(mimeType, "application/vnd.google-apps.") {
-		rawURL = "https://www.googleapis.com/drive/v3/files/" + url.PathEscape(fileID) +
+	exportID := fileID
+
+	switch mimeType {
+	case "application/vnd.google-apps.document":
+		// already a Google Doc — export directly
+
+	case "application/vnd.google-apps.spreadsheet",
+		"application/vnd.google-apps.presentation",
+		"application/vnd.google-apps.drawing":
+		rawURL := "https://www.googleapis.com/drive/v3/files/" + url.PathEscape(fileID) +
 			"/export?mimeType=text/plain"
-	} else {
-		rawURL = "https://www.googleapis.com/drive/v3/files/" + url.PathEscape(fileID) +
-			"?alt=media"
+		body, err := c.doRequest(ctx, http.MethodGet, rawURL, nil)
+		if err != nil {
+			return "", err
+		}
+		return string(body), nil
+
+	default:
+		// Office format (.docx, .xlsx, etc.) — convert to Google Doc, export, delete temp.
+		log.Printf("[gdrive] converting %q (%s) to Google Doc for markdown export", fileID, mimeType)
+		tmpID, err := c.copyAsGoogleDoc(ctx, fileID)
+		if err != nil {
+			return "", fmt.Errorf("convert to Google Doc: %w", err)
+		}
+		defer func() {
+			if delErr := c.deleteFile(ctx, tmpID); delErr != nil {
+				log.Printf("[gdrive] failed to delete temp doc %s: %v", tmpID, delErr)
+			}
+		}()
+		exportID = tmpID
 	}
+
+	rawURL := "https://docs.google.com/feeds/download/documents/export/Export?exportFormat=markdown&id=" + url.QueryEscape(exportID)
+	log.Printf("[gdrive] GetDocContent export url=%s", rawURL)
 	body, err := c.doRequest(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", err
 	}
+	log.Printf("[gdrive] GetDocContent got %d bytes", len(body))
 	return string(body), nil
+}
+
+// copyAsGoogleDoc copies fileID to a new Google Doc (Drive converts the format).
+// Returns the new file's ID.
+func (c *Client) copyAsGoogleDoc(ctx context.Context, fileID string) (string, error) {
+	payload, _ := json.Marshal(map[string]any{
+		"mimeType": "application/vnd.google-apps.document",
+		"name":     "_tmp_export",
+	})
+	u := "https://www.googleapis.com/drive/v3/files/" + url.PathEscape(fileID) + "/copy?fields=id"
+	body, err := c.doRequest(ctx, http.MethodPost, u, payload)
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("parse copy response: %w", err)
+	}
+	if resp.ID == "" {
+		return "", fmt.Errorf("copy response contained no file ID")
+	}
+	return resp.ID, nil
+}
+
+// deleteFile permanently deletes a Drive file by ID.
+func (c *Client) deleteFile(ctx context.Context, fileID string) error {
+	u := "https://www.googleapis.com/drive/v3/files/" + url.PathEscape(fileID)
+	_, err := c.doRequest(ctx, http.MethodDelete, u, nil)
+	return err
 }
 
 // CreateDoc creates a new Google Doc in folderID by uploading content as plain text.
@@ -403,6 +463,48 @@ func (c *Client) ShareFile(ctx context.Context, fileID, email, role string) (str
 		return "", fmt.Errorf("parse ShareFile response: %w", err)
 	}
 	return resp.ID, nil
+}
+
+// GetDocumentContent fetches the text content of a Google Doc.
+// Extracts all text from the document body elements.
+func (c *Client) GetDocumentContent(ctx context.Context, docID string) (string, error) {
+	u := "https://docs.googleapis.com/v1/documents/" + url.PathEscape(docID)
+	respBody, err := c.doRequest(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", fmt.Errorf("fetch document: %w", err)
+	}
+
+	var doc struct {
+		Body struct {
+			Content []struct {
+				Paragraph *struct {
+					Elements []struct {
+						TextRun *struct {
+							Content string `json:"content"`
+						} `json:"textRun"`
+					} `json:"elements"`
+				} `json:"paragraph"`
+				Table *struct{} `json:"table"`
+			} `json:"content"`
+		} `json:"body"`
+	}
+
+	if err := json.Unmarshal(respBody, &doc); err != nil {
+		return "", fmt.Errorf("parse document: %w", err)
+	}
+
+	var text strings.Builder
+	for _, elem := range doc.Body.Content {
+		if elem.Paragraph != nil {
+			for _, textElem := range elem.Paragraph.Elements {
+				if textElem.TextRun != nil {
+					text.WriteString(textElem.TextRun.Content)
+				}
+			}
+		}
+	}
+
+	return text.String(), nil
 }
 
 // doRequest performs an authenticated HTTP request and returns the response body.

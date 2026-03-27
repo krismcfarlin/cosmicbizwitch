@@ -27,37 +27,38 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			if err != nil {
 				return nil, fmt.Errorf("gdrive_get_file: %w", err)
 			}
-			out := map[string]any{
+			content, err := gc.GetDocContent(ctx, fileID, f.MimeType)
+			if err != nil {
+				return nil, fmt.Errorf("gdrive_get_file: fetch content: %w", err)
+			}
+			// Store content under result_var if set, otherwise under "content".
+			contentKey := gdriveString(input, "result_var")
+			if contentKey == "" {
+				contentKey = "content"
+			}
+			return map[string]any{
+				"file_id":   fileID,
+				"doc_id":    fileID, // alias used by gdrive_fill_template and gdrive_export_pdf
 				"file_name": f.Name,
 				"file_url":  f.WebViewLink,
 				"mime_type": f.MimeType,
-				"is_folder": f.IsFolder,
-			}
-
-			// If result_var is set, fetch the file content and store it.
-			resultVar := gdriveString(input, "result_var")
-			if resultVar != "" {
-				content, err := gc.GetDocContent(ctx, fileID, f.MimeType)
-				if err != nil {
-					return nil, fmt.Errorf("gdrive_get_file: fetch content: %w", err)
-				}
-				out[resultVar] = content
-			}
-			return out, nil
+				contentKey:  content,
+			}, nil
 		},
 		workflow.ActivityMeta{
 			Category:    "Google Workspace",
-			Description: "Fetches a Google Drive file's metadata and optionally its text content into a context variable.",
+			Description: "Downloads a Google Drive file as markdown and puts the content into the workflow context.",
 			InputFields: []workflow.FieldMeta{
 				{Name: "file_id", Type: "gdrive_file", Required: true, Description: "Google Drive file — use the Browse button to pick."},
-				{Name: "result_var", Type: "string", Description: "If set, fetches the file's text content and stores it under this variable name (e.g. doc_content)."},
+				{Name: "result_var", Type: "string", Description: "Context key to store content under (default: content)."},
 			},
 			OutputFields: []workflow.FieldMeta{
-				{Name: "file_name", Type: "string", Description: "File or folder name."},
+				{Name: "file_id", Type: "string", Description: "Google Drive file ID."},
+				{Name: "doc_id", Type: "string", Description: "Alias for file_id — use with gdrive_fill_template and gdrive_export_pdf."},
+				{Name: "file_name", Type: "string", Description: "File name."},
 				{Name: "file_url", Type: "string", Description: "Web view URL."},
 				{Name: "mime_type", Type: "string", Description: "MIME type."},
-				{Name: "is_folder", Type: "boolean", Description: "True if this is a folder."},
-				{Name: "<result_var>", Type: "string", Description: "Text content of the file, stored under the name you provide in result_var."},
+				{Name: "content", Type: "string", Description: "File contents as markdown (or result_var if set)."},
 			},
 		},
 	)
@@ -122,24 +123,52 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			if gc == nil {
 				return map[string]any{"error": "Google Drive not configured — add credentials in Settings"}, nil
 			}
-			docID := gdriveString(input, "doc_id")
-			if docID == "" {
-				return nil, fmt.Errorf("gdrive_fill_template: doc_id is required")
+			templateID := gdriveString(input, "template_id")
+			if templateID == "" {
+				return nil, fmt.Errorf("gdrive_fill_template: template_id is required")
 			}
+			folderID := gdriveString(input, "destination_folder_id")
+			if folderID == "" {
+				return nil, fmt.Errorf("gdrive_fill_template: destination_folder_id is required")
+			}
+			title := gdriveString(input, "title")
+			if title == "" {
+				// Fall back to original file's name.
+				orig, err := gc.GetFile(ctx, templateID)
+				if err != nil {
+					return nil, fmt.Errorf("gdrive_fill_template: fetch original title: %w", err)
+				}
+				title = orig.Name
+			}
+
+			// Copy template to destination folder.
+			fmt.Printf("[gdrive_fill_template] Copying template %s to folder %s\n", templateID, folderID)
+			docID, webURL, err := gc.CopyFile(ctx, templateID, title, folderID)
+			if err != nil {
+				return nil, fmt.Errorf("gdrive_fill_template: copy template: %w", err)
+			}
+			fmt.Printf("[gdrive_fill_template] Created new document: %s\n", docID)
 
 			// Build the replacement map.
 			vars := make(map[string]string)
 
 			varsRaw := gdriveString(input, "vars")
 			if varsRaw != "" {
-				// User provided explicit JSON overrides.
+				// User provided explicit JSON overrides (string form).
 				if err := json.Unmarshal([]byte(varsRaw), &vars); err != nil {
 					return nil, fmt.Errorf("gdrive_fill_template: vars is not valid JSON: %w", err)
 				}
+			} else if varsMap, ok := input["vars"].(map[string]any); ok {
+				// execute-node debug panel coerces JSON strings to native maps — handle that here.
+				for k, v := range varsMap {
+					if s, ok := v.(string); ok {
+						vars[k] = s
+					}
+				}
 			} else {
-				// Use all string-valued keys in the workflow context, excluding internals.
+				// Use all string-valued keys from the workflow context, excluding internals.
 				skip := map[string]bool{
-					"doc_id": true, "vars": true,
+					"template_id": true, "destination_folder_id": true, "title": true, "vars": true,
 				}
 				for k, v := range input {
 					if len(k) > 0 && k[0] == '_' {
@@ -154,24 +183,35 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 				}
 			}
 
+			fmt.Printf("[gdrive_fill_template] Replacing %d variables in document\n", len(vars))
+			for k, v := range vars {
+				fmt.Printf("  {{%s}} -> %s\n", k, v)
+			}
 			count, err := gc.ReplaceAllText(ctx, docID, vars)
 			if err != nil {
-				return nil, fmt.Errorf("gdrive_fill_template: %w", err)
+				return nil, fmt.Errorf("gdrive_fill_template: fill template: %w", err)
 			}
+			fmt.Printf("[gdrive_fill_template] Completed - %d replacements made\n", count)
 			return map[string]any{
 				"doc_id":            docID,
+				"doc_url":           webURL,
+				"doc_title":         title,
 				"replacements_made": count,
 			}, nil
 		},
 		workflow.ActivityMeta{
 			Category:    "Google Workspace",
-			Description: "Replaces {{variable}} placeholders in a Google Doc using workflow context values.",
+			Description: "Copies a Google Doc template to a destination folder and replaces {{variable}} placeholders using provided vars.",
 			InputFields: []workflow.FieldMeta{
-				{Name: "doc_id", Type: "string", Required: true, Description: "ID of the Google Doc to fill in. Pipe in {{doc_id}} from gdrive_copy_template."},
-				{Name: "vars", Type: "string", Description: "Optional JSON object of {placeholder: value} overrides. If omitted, all string values from the workflow context are used."},
+				{Name: "template_id", Type: "gdrive_file", Required: true, Description: "The Google Doc to copy — use Browse to pick."},
+				{Name: "destination_folder_id", Type: "gdrive_folder", Required: true, Description: "Drive folder for the copy — use Browse to pick."},
+				{Name: "title", Type: "string", Description: "Name for the new document. Supports {{key}} interpolation. Defaults to the original document name."},
+				{Name: "vars", Type: "json", Description: "JSON object mapping placeholder name to value. Engine interpolates {{ctx_key}} inside this string."},
 			},
 			OutputFields: []workflow.FieldMeta{
-				{Name: "doc_id", Type: "string", Description: "Pass-through document ID."},
+				{Name: "doc_id", Type: "string", Description: "Drive ID of the new document copy."},
+				{Name: "doc_url", Type: "string", Description: "Web view URL of the new document."},
+				{Name: "doc_title", Type: "string", Description: "Title used for the new document."},
 				{Name: "replacements_made", Type: "number", Description: "Total number of placeholder occurrences replaced."},
 			},
 		},
@@ -219,6 +259,60 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			InputFields: []workflow.FieldMeta{
 				{Name: "doc_id", Type: "string", Required: true, Description: "ID of the Google Doc to export. Pipe in {{doc_id}} from earlier steps."},
 				{Name: "destination_folder_id", Type: "gdrive_folder", Required: true, Description: "Drive folder to save the PDF into — use Browse to pick."},
+				{Name: "filename", Type: "string", Description: "PDF filename. Supports {{key}} interpolation. Defaults to document title + \".pdf\"."},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "pdf_id", Type: "string", Description: "Drive ID of the saved PDF."},
+				{Name: "pdf_url", Type: "string", Description: "Web view URL of the PDF."},
+				{Name: "pdf_filename", Type: "string", Description: "Filename of the saved PDF."},
+			},
+		},
+	)
+
+	// ── convert_to_pdf ──────────────────────────────────────────────────────
+
+	eng.RegisterActivityWithMeta("convert_to_pdf",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			gc := getGoogle()
+			if gc == nil {
+				return map[string]any{"error": "Google Drive not configured — add credentials in Settings"}, nil
+			}
+			docID := gdriveString(input, "doc_id")
+			if docID == "" {
+				return nil, fmt.Errorf("convert_to_pdf: doc_id is required")
+			}
+			folderID := gdriveString(input, "folder_id")
+			if folderID == "" {
+				return nil, fmt.Errorf("convert_to_pdf: folder_id is required")
+			}
+			filename := gdriveString(input, "filename")
+			if filename == "" {
+				// Default to the document's title + ".pdf".
+				f, err := gc.GetFile(ctx, docID)
+				if err != nil {
+					return nil, fmt.Errorf("convert_to_pdf: fetch doc title: %w", err)
+				}
+				filename = f.Name + ".pdf"
+			}
+
+			fmt.Printf("[convert_to_pdf] Converting doc %s to PDF\n", docID)
+			pdf, err := gc.ExportAndSavePDF(ctx, docID, folderID, filename)
+			if err != nil {
+				return nil, fmt.Errorf("convert_to_pdf: %w", err)
+			}
+			fmt.Printf("[convert_to_pdf] PDF saved: %s\n", pdf.Name)
+			return map[string]any{
+				"pdf_id":       pdf.ID,
+				"pdf_url":      pdf.WebViewLink,
+				"pdf_filename": pdf.Name,
+			}, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "Google Workspace",
+			Description: "Converts a Google Doc to PDF and saves it to a Drive folder.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "doc_id", Type: "string", Required: true, Description: "ID of the Google Doc to convert. Pipe in {{doc_id}} from earlier steps."},
+				{Name: "folder_id", Type: "gdrive_folder", Required: true, Description: "Drive folder to save the PDF into — use Browse to pick."},
 				{Name: "filename", Type: "string", Description: "PDF filename. Supports {{key}} interpolation. Defaults to document title + \".pdf\"."},
 			},
 			OutputFields: []workflow.FieldMeta{

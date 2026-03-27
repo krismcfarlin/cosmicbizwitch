@@ -23,6 +23,10 @@ export default function Settings() {
   const [loadError, setLoadError] = useState('')
   const [googleConnected, setGoogleConnected] = useState<boolean | null>(null)
   const [googleConnecting, setGoogleConnecting] = useState(false)
+  const [googleRefreshToken, setGoogleRefreshToken] = useState('')
+  const [testTemplateDocId, setTestTemplateDocId] = useState('')
+  const [testDestFolderId, setTestDestFolderId] = useState('')
+  const [copiedText, setCopiedText] = useState('')
   const navigate = useNavigate()
 
   const load = useCallback(async () => {
@@ -58,6 +62,27 @@ export default function Settings() {
       .then(d => setGoogleConnected(d.connected))
       .catch(() => setGoogleConnected(false))
   }, [])
+
+  // Fetch refresh token when Google is connected
+  useEffect(() => {
+    if (googleConnected) {
+      fetch('/app/settings')
+        .then(r => r.json())
+        .then((data: Setting[]) => {
+          const tokenSetting = data.find(s => s.key === 'GOOGLE_REFRESH_TOKEN')
+          if (tokenSetting && tokenSetting.value) {
+            setGoogleRefreshToken(tokenSetting.value)
+          }
+        })
+        .catch(() => {})
+    }
+  }, [googleConnected])
+
+  const copyToClipboard = (text: string, label: string) => {
+    navigator.clipboard.writeText(text)
+    setCopiedText(label)
+    setTimeout(() => setCopiedText(''), 2000)
+  }
 
   const connectGoogle = () => {
     setGoogleConnecting(true)
@@ -178,12 +203,11 @@ export default function Settings() {
 
         {/* Google Drive connection */}
         <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', padding: '20px 24px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
             <div>
               <div style={{ fontWeight: 600, fontSize: '14px', color: '#2c3e50', marginBottom: '4px' }}>Google Drive</div>
               <div style={{ fontSize: '12px', color: '#888', lineHeight: '1.5' }}>
-                OAuth2 authorization for Google Workspace workflow nodes.<br />
-                Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET above first.
+                OAuth2 authorization for Google Workspace workflow nodes.
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexShrink: 0, marginLeft: '24px' }}>
@@ -201,6 +225,122 @@ export default function Settings() {
               >
                 {googleConnecting ? 'Waiting for auth...' : googleConnected ? 'Reconnect' : 'Connect Google Drive'}
               </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Integration Test Setup */}
+        <div style={{ background: '#1e293b', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
+          <div style={{ background: '#0f172a', padding: '16px 24px', borderBottom: '1px solid #334155' }}>
+            <div style={{ fontWeight: 700, fontSize: '16px', color: '#fff' }}>🧪 Integration Test Setup</div>
+            <div style={{ fontSize: '12px', color: '#cbd5e1', marginTop: '4px' }}>Get credentials to run gdrive_fill_template test</div>
+          </div>
+
+          <div style={{ padding: '24px' }}>
+            {/* Token */}
+            <div style={{ marginBottom: '24px' }}>
+              <div style={{ fontWeight: 600, fontSize: '13px', color: '#e2e8f0', marginBottom: '8px' }}>1. GOOGLE_REFRESH_TOKEN</div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  type="password"
+                  value={googleRefreshToken}
+                  readOnly
+                  placeholder="Token will appear here after connecting Google Drive..."
+                  style={{ flex: 1, padding: '10px', background: '#0f172a', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0', fontFamily: 'monospace', fontSize: '12px' }}
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(googleRefreshToken)
+                    setCopiedText('TOKEN')
+                    setTimeout(() => setCopiedText(''), 2000)
+                  }}
+                  style={{ padding: '10px 16px', background: '#0ea5e9', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '12px', whiteSpace: 'nowrap' }}
+                >
+                  {copiedText === 'TOKEN' ? '✓ Copied' : 'Copy'}
+                </button>
+              </div>
+            </div>
+
+            {/* Doc ID */}
+            <div style={{ marginBottom: '24px' }}>
+              <div style={{ fontWeight: 600, fontSize: '13px', color: '#e2e8f0', marginBottom: '8px' }}>2. TEST_TEMPLATE_DOC_ID</div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  type="text"
+                  value={testTemplateDocId}
+                  onChange={e => setTestTemplateDocId(e.target.value)}
+                  placeholder="Paste your template Google Doc ID here"
+                  style={{ flex: 1, padding: '10px', background: '#0f172a', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0', fontFamily: 'monospace', fontSize: '12px' }}
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(testTemplateDocId)
+                    setCopiedText('DOC')
+                    setTimeout(() => setCopiedText(''), 2000)
+                  }}
+                  disabled={!testTemplateDocId}
+                  style={{ padding: '10px 16px', background: testTemplateDocId ? '#0ea5e9' : '#64748b', color: 'white', border: 'none', borderRadius: '4px', cursor: testTemplateDocId ? 'pointer' : 'default', fontWeight: 600, fontSize: '12px', whiteSpace: 'nowrap' }}
+                >
+                  {copiedText === 'DOC' ? '✓ Copied' : 'Copy'}
+                </button>
+              </div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>Get from Workflows: Browse gdrive_fill_template template_id → check server logs for [TEST_TEMPLATE_DOC_ID]</div>
+            </div>
+
+            {/* Folder ID */}
+            <div style={{ marginBottom: '24px' }}>
+              <div style={{ fontWeight: 600, fontSize: '13px', color: '#e2e8f0', marginBottom: '8px' }}>3. TEST_DEST_FOLDER_ID</div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  type="text"
+                  value={testDestFolderId}
+                  onChange={e => setTestDestFolderId(e.target.value)}
+                  placeholder="Paste your destination folder ID here"
+                  style={{ flex: 1, padding: '10px', background: '#0f172a', border: '1px solid #334155', borderRadius: '4px', color: '#e2e8f0', fontFamily: 'monospace', fontSize: '12px' }}
+                />
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(testDestFolderId)
+                    setCopiedText('FOLDER')
+                    setTimeout(() => setCopiedText(''), 2000)
+                  }}
+                  disabled={!testDestFolderId}
+                  style={{ padding: '10px 16px', background: testDestFolderId ? '#0ea5e9' : '#64748b', color: 'white', border: 'none', borderRadius: '4px', cursor: testDestFolderId ? 'pointer' : 'default', fontWeight: 600, fontSize: '12px', whiteSpace: 'nowrap' }}
+                >
+                  {copiedText === 'FOLDER' ? '✓ Copied' : 'Copy'}
+                </button>
+              </div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>Get from Workflows: Browse gdrive_fill_template destination_folder_id → check server logs for [TEST_DEST_FOLDER_ID]</div>
+            </div>
+
+            {/* Test Command */}
+            <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: '4px', padding: '12px', marginTop: '24px' }}>
+              <div style={{ fontWeight: 600, fontSize: '12px', color: '#e2e8f0', marginBottom: '8px' }}>Run Test Command:</div>
+              <div style={{ fontFamily: 'monospace', fontSize: '11px', color: '#cbd5e1', lineHeight: '1.6', background: '#000000', padding: '12px', borderRadius: '3px', overflow: 'auto' }}>
+                {googleRefreshToken && testTemplateDocId && testDestFolderId ? (
+                  <>
+                    export GOOGLE_REFRESH_TOKEN="{googleRefreshToken}"<br/>
+                    export TEST_TEMPLATE_DOC_ID="{testTemplateDocId}"<br/>
+                    export TEST_DEST_FOLDER_ID="{testDestFolderId}"<br/>
+                    go test -v ./internal/app/workflows -run TestGdriveFillTemplateWorkflow
+                  </>
+                ) : (
+                  'Fill in all three values above to see the command'
+                )}
+              </div>
+              {googleRefreshToken && testTemplateDocId && testDestFolderId && (
+                <button
+                  onClick={() => {
+                    const cmd = `export GOOGLE_REFRESH_TOKEN="${googleRefreshToken}"\nexport TEST_TEMPLATE_DOC_ID="${testTemplateDocId}"\nexport TEST_DEST_FOLDER_ID="${testDestFolderId}"\ngo test -v ./internal/app/workflows -run TestGdriveFillTemplateWorkflow`
+                    navigator.clipboard.writeText(cmd)
+                    setCopiedText('CMD')
+                    setTimeout(() => setCopiedText(''), 2000)
+                  }}
+                  style={{ marginTop: '12px', padding: '10px 16px', background: '#10b981', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '12px', width: '100%' }}
+                >
+                  {copiedText === 'CMD' ? '✓ Copied Full Command' : 'Copy Full Command'}
+                </button>
+              )}
             </div>
           </div>
         </div>

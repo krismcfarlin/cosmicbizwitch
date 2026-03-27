@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 
 	googleapp "cosmicbizwitch/internal/app/google"
 
@@ -20,17 +21,26 @@ func (s *Server) handleGoogleAuthStatus(w http.ResponseWriter, r *http.Request) 
 	s.respondJSON(w, http.StatusOK, map[string]any{"connected": connected})
 }
 
+// getGoogleOAuthCredentials returns OAuth credentials from settings or environment
+func (s *Server) getGoogleOAuthCredentials() (clientID, clientSecret string) {
+	// Try settings first, then environment, then defaults
+	clientID = s.settings.Get("GOOGLE_CLIENT_ID")
+	if clientID == "" {
+		clientID = os.Getenv("GOOGLE_CLIENT_ID")
+	}
+	clientSecret = s.settings.Get("GOOGLE_CLIENT_SECRET")
+	if clientSecret == "" {
+		clientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
+	}
+	return
+}
+
 // handleGoogleAuthStart initiates the OAuth2 flow for Google Drive/Docs.
 // It starts a temporary listener on :54321 to catch the callback, then
 // redirects the browser to Google's consent page.
 // GET /api/google/auth/start
 func (s *Server) handleGoogleAuthStart(w http.ResponseWriter, r *http.Request) {
-	clientID := s.settings.Get("GOOGLE_CLIENT_ID")
-	clientSecret := s.settings.Get("GOOGLE_CLIENT_SECRET")
-	if clientID == "" || clientSecret == "" {
-		http.Error(w, "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set in Settings before authorizing", http.StatusBadRequest)
-		return
-	}
+	clientID, clientSecret := s.getGoogleOAuthCredentials()
 
 	cfg := googleapp.OAuthConfig(clientID, clientSecret)
 	state := randomHex(16)
@@ -124,7 +134,50 @@ func (s *Server) handleGoogleDriveBrowse(w http.ResponseWriter, r *http.Request)
 		s.respondError(w, http.StatusInternalServerError, "list Drive files failed", err)
 		return
 	}
+
+	// Log file/folder IDs for easy copying to test env vars
+	for _, f := range files {
+		if f.MimeType == "application/vnd.google-apps.folder" {
+			s.logger.Printf("[TEST_DEST_FOLDER_ID] %s: %s", f.Name, f.ID)
+		} else if f.MimeType == "application/vnd.google-apps.document" {
+			s.logger.Printf("[TEST_TEMPLATE_DOC_ID] %s: %s", f.Name, f.ID)
+		}
+	}
+
 	s.respondJSON(w, http.StatusOK, files)
+}
+
+// handleGdriveGetContent fetches the text content of a Google Doc.
+// GET /api/workflows/gdrive-content?file_id=<docID>
+func (s *Server) handleGdriveGetContent(w http.ResponseWriter, r *http.Request) {
+	gc := s.settings.GoogleClient()
+	if gc == nil {
+		s.respondJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"error": "Google Drive not configured",
+		})
+		return
+	}
+
+	fileID := r.URL.Query().Get("file_id")
+	if fileID == "" {
+		s.respondJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "missing file_id parameter",
+		})
+		return
+	}
+
+	content, err := gc.GetDocumentContent(r.Context(), fileID)
+	if err != nil {
+		s.logger.Printf("gdrive get content %s: %v", fileID, err)
+		s.respondJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": "failed to fetch document content",
+		})
+		return
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]any{
+		"text": content,
+	})
 }
 
 func randomHex(n int) string {

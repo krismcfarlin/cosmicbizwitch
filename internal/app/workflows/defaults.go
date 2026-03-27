@@ -25,9 +25,10 @@ import (
 
 // RegisterDefaults wires up built-in demo activities and graphs into the engine.
 func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client, getGoogle func() *googleapp.Client) error {
-	registerActivities(eng, app, getCF)
+	registerActivities(eng, app, getCF, log.Default())
 	registerGoogleActivities(eng, getGoogle)
 	registerTemplateFill(eng)
+	registerTextSubstitute(eng)
 	return registerGraphs(eng, getCF)
 }
 
@@ -1241,6 +1242,80 @@ func registerTemplateFill(eng *workflow.Engine) {
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "<result_var>", Type: "string", Description: "The filled template text, stored under the name provided in result_var (default: filled_content)."},
+			},
+		},
+	)
+}
+
+// ── text_substitute ────────────────────────────────────────────────────────────
+
+func registerTextSubstitute(eng *workflow.Engine) {
+	eng.RegisterActivityWithMeta("text_substitute",
+		func(_ context.Context, input map[string]any) (map[string]any, error) {
+			source, _ := input["source"].(string)
+			if source == "" {
+				return nil, fmt.Errorf("text_substitute: source is required")
+			}
+			resultVar, _ := input["result_var"].(string)
+			if resultVar == "" {
+				resultVar = "substituted"
+			}
+
+			// Auto-dereference: if source is a bare context key name (e.g. "cc_rr" instead of "{{cc_rr}}"),
+			// look it up in the input map directly and default result_var to that same key.
+			if val, ok := input[source]; ok {
+				if s, ok2 := val.(string); ok2 && s != source {
+					log.Printf("[text_substitute] auto-dereferencing source key %q", source)
+					if resultVar == "substituted" {
+						resultVar = source // write result back to same key
+					}
+					source = s
+				}
+			}
+
+			// Normalize markdown-escaped placeholders: {{about\_your\_business}} → {{about_your_business}}
+			escapedPlaceholder := regexp.MustCompile(`\{\{([^}]+)\}\}`)
+			result := escapedPlaceholder.ReplaceAllStringFunc(source, func(match string) string {
+				inner := match[2 : len(match)-2] // strip {{ and }}
+				return "{{" + strings.ReplaceAll(inner, `\_`, "_") + "}}"
+			})
+
+			// Build vars map from input["vars"] — may be a JSON string or already-parsed map.
+			vars := map[string]string{}
+			switch v := input["vars"].(type) {
+			case string:
+				if err := json.Unmarshal([]byte(v), &vars); err != nil {
+					log.Printf("[text_substitute] failed to parse vars JSON: %v", err)
+				}
+			case map[string]any:
+				for k, val := range v {
+					vars[k] = fmt.Sprintf("%v", val)
+				}
+			}
+
+			log.Printf("[text_substitute] source len=%d vars=%v", len(result), vars)
+			replaced := 0
+			for k, val := range vars {
+				before := result
+				result = strings.ReplaceAll(result, "{{"+k+"}}", val)
+				if result != before {
+					replaced++
+				}
+			}
+			log.Printf("[text_substitute] replaced %d/%d vars; result len=%d", replaced, len(vars), len(result))
+
+			return map[string]any{resultVar: result}, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "Utility",
+			Description: "Replaces {{placeholder}} tokens in a source text with mapped values. Use the Substitution Builder to map template variables to context keys.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "source", Type: "string", Required: true, Description: "Template text with {{placeholder}} tokens. Supports {{ctx_var}} to pull from context."},
+				{Name: "vars", Type: "json", Description: "JSON object mapping placeholder name to value. Engine interpolates {{ctx_key}} inside this string."},
+				{Name: "result_var", Type: "string", Description: "Variable name to store the substituted result in. Defaults to substituted."},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "<result_var>", Type: "string", Description: "The text after all substitutions, stored under the name provided in result_var (default: substituted)."},
 			},
 		},
 	)
