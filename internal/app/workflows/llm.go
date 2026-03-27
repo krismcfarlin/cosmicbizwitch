@@ -2,6 +2,7 @@ package workflows
 
 import (
 	"bytes"
+	"regexp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -41,6 +42,19 @@ func registerLLMActivity(eng *workflow.Engine, app core.App, logger *log.Logger)
 			// in them). We apply a second pass so these named vars can be used in
 			// the prompt template, e.g. {{contact_name}}.
 			promptVars := llmStringMap(input, "prompt_vars")
+
+			// Normalize markdown-escaped placeholders in prompt before substitution
+			// e.g. {{about\_your\_business}} → {{about_your_business}}
+			escapedPlaceholder := regexp.MustCompile(`\{\{([^}]+)\}\}`)
+			prompt = escapedPlaceholder.ReplaceAllStringFunc(prompt, func(match string) string {
+				inner := match[2 : len(match)-2] // strip {{ and }}
+				return "{{" + strings.ReplaceAll(inner, `\_`, "_") + "}}"
+			})
+			systemPrompt = escapedPlaceholder.ReplaceAllStringFunc(systemPrompt, func(match string) string {
+				inner := match[2 : len(match)-2] // strip {{ and }}
+				return "{{" + strings.ReplaceAll(inner, `\_`, "_") + "}}"
+			})
+
 			for k, v := range promptVars {
 				prompt = strings.ReplaceAll(prompt, "{{"+k+"}}", v)
 				systemPrompt = strings.ReplaceAll(systemPrompt, "{{"+k+"}}", v)

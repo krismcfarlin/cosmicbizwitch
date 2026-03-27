@@ -135,6 +135,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/google/auth/start", s.requireAuth(s.handleGoogleAuthStart))
 	mux.HandleFunc("GET /api/google/auth/status", s.requireAuth(s.handleGoogleAuthStatus))
 	mux.HandleFunc("GET /api/google/drive/browse", s.requireAuth(s.handleGoogleDriveBrowse))
+	mux.HandleFunc("GET /api/workflows/gdrive-content", s.requireAuth(s.handleGdriveGetContent))
 
 	// Settings API (auth required)
 	mux.HandleFunc("GET /app/settings", s.requireAuth(s.handleSettingsList))

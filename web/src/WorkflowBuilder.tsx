@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -1467,16 +1467,26 @@ function DrivePicker({ value, displayName, mode, onSelect }: DrivePickerProps) {
 
   const currentParent = breadcrumb[breadcrumb.length - 1]
 
+  const [notConnected, setNotConnected] = useState(false)
+
   const loadFolder = async (parentId: string) => {
     setLoading(true)
     setError('')
+    setNotConnected(false)
     try {
       const url = parentId
         ? `/api/google/drive/browse?parent=${encodeURIComponent(parentId)}`
         : '/api/google/drive/browse'
       const res = await fetch(url, { credentials: 'include' })
-      if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
+      if (!res.ok || data?.error) {
+        const msg: string = data?.error || await res.text()
+        if (msg.includes('not configured') || msg.includes('auth/start')) {
+          setNotConnected(true)
+          return
+        }
+        throw new Error(msg)
+      }
       setItems((data || []).map((f: any) => ({
         id: f.id,
         name: f.name,
@@ -1598,8 +1608,27 @@ function DrivePicker({ value, displayName, mode, onSelect }: DrivePickerProps) {
             {/* File list */}
             <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
               {loading && <div style={{ padding: '20px', textAlign: 'center', color: '#888', fontSize: '12px' }}>Loading...</div>}
+              {notConnected && (
+                <div style={{ padding: '24px 20px', textAlign: 'center' }}>
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: '#334155', marginBottom: '8px' }}>Google Drive not connected</div>
+                  <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '16px' }}>You need to authorize access to your Google Drive first.</div>
+                  <a
+                    href="/api/google/auth/start"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setOpen(false)}
+                    style={{
+                      display: 'inline-block', padding: '8px 16px',
+                      background: '#0369a1', color: 'white', borderRadius: '5px',
+                      fontSize: '12px', fontWeight: 600, textDecoration: 'none',
+                    }}
+                  >
+                    Connect Google Drive
+                  </a>
+                </div>
+              )}
               {error && <div style={{ padding: '12px 16px', color: '#e74c3c', fontSize: '12px' }}>{error}</div>}
-              {!loading && !error && items.length === 0 && (
+              {!loading && !notConnected && !error && items.length === 0 && (
                 <div style={{ padding: '20px', textAlign: 'center', color: '#aaa', fontSize: '12px' }}>
                   {mode === 'folder' ? 'No subfolders' : 'Empty folder'}
                 </div>
@@ -1628,6 +1657,507 @@ function DrivePicker({ value, displayName, mode, onSelect }: DrivePickerProps) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── PromptVarsBuilderModal ────────────────────────────────────────────────────
+
+function PromptVarsBuilderModal({ existingVars, onSave, onClose, defaultSourceJson = '' }: {
+  existingVars: Record<string, string>
+  onSave: (vars: Record<string, string>) => void
+  onClose: () => void
+  defaultSourceJson?: string
+}) {
+  const [sourceText, setSourceText] = useState(defaultSourceJson)
+  const [sourcePaths, setSourcePaths] = useState<string[]>([])
+  const [sourceParseError, setSourceParseError] = useState('')
+  const [sourceFilter, setSourceFilter] = useState('')
+  const [vars, setVars] = useState<Array<{ key: string; value: string }>>(
+    Object.entries(existingVars).map(([k, v]) => ({ key: k, value: v }))
+  )
+  const dragRef = useRef<string>('')
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (!defaultSourceJson || defaultSourceJson.trim() === '' || defaultSourceJson.trim() === '{}') return
+    try {
+      const parsed = JSON.parse(defaultSourceJson)
+      const out: string[] = []
+      collectLeafPaths(parsed, '', 0, out)
+      setSourcePaths(out.filter(p => p !== ''))
+    } catch { /* ignore */ }
+  }, [defaultSourceJson])
+
+  const parseSource = () => {
+    setSourceParseError('')
+    setSourcePaths([])
+    let parsed: unknown
+    try { parsed = JSON.parse(sourceText) } catch { setSourceParseError('Invalid JSON.'); return }
+    const out: string[] = []
+    collectLeafPaths(parsed, '', 0, out)
+    setSourcePaths(out.filter(p => p !== ''))
+  }
+
+  const addBlank = () => setVars(v => [...v, { key: `var${v.length + 1}`, value: '' }])
+
+  const addFromCtx = (path: string) => {
+    if (!path) return
+    const lastSeg = path.split('.').pop() ?? path
+    const varName = lastSeg.replace(/[^a-zA-Z0-9_]/g, '_')
+    const key = vars.some(r => r.key === varName) ? path.replace(/\./g, '_') : varName
+    setVars(v => [...v, { key, value: `{{${path}}}` }])
+  }
+
+  const updateKey = (i: number, k: string) => setVars(v => v.map((r, idx) => idx === i ? { ...r, key: k } : r))
+  const updateVal = (i: number, val: string) => setVars(v => v.map((r, idx) => idx === i ? { ...r, value: val } : r))
+  const removeRow = (i: number) => setVars(v => v.filter((_, idx) => idx !== i))
+
+  const handleDrop = (i: number) => {
+    const from = dragRef.current
+    if (!from) return
+    updateVal(i, `{{${from}}}`)
+    setDragOverIdx(null)
+  }
+
+  const usedPaths = new Set(
+    vars.map(r => { const m = r.value.match(/^\{\{(.+)\}\}$/); return m ? m[1] : null }).filter(Boolean) as string[]
+  )
+
+  const save = () => {
+    const result: Record<string, string> = {}
+    for (const { key, value } of vars) {
+      if (key.trim()) result[key.trim()] = value
+    }
+    onSave(result)
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '860px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: '#1e293b', color: 'white' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: '15px' }}>Prompt Variables Builder</div>
+            <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>Define named variables → use {'{{var_name}}'} in your prompt</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#94a3b8', lineHeight: 1 }}>✕</button>
+        </div>
+
+        <div style={{ flex: 1, overflow: 'auto', display: 'flex', gap: 0, minHeight: 0 }}>
+
+          {/* LEFT — Context Keys */}
+          <div style={{ flex: '0 0 300px', borderRight: '1px solid #e0e6ed', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Context Keys <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag onto values)</span>
+            </div>
+            <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+              Paste sample JSON from a previous node, then click Parse Keys.
+            </div>
+            <textarea
+              value={sourceText}
+              onChange={e => setSourceText(e.target.value)}
+              rows={6}
+              placeholder={'{\n  "first_name": "Jane",\n  "last_name": "Smith",\n  "email": "jane@example.com"\n}'}
+              spellCheck={false}
+              style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+            />
+            {sourceParseError && <div style={{ color: '#e74c3c', fontSize: '11px' }}>{sourceParseError}</div>}
+            <button
+              onClick={parseSource}
+              style={{ padding: '5px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}
+            >
+              Parse Keys
+            </button>
+
+            {sourcePaths.length > 0 && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', whiteSpace: 'nowrap' }}>SOURCE KEYS:</div>
+                  <input
+                    type="text"
+                    placeholder="filter..."
+                    value={sourceFilter}
+                    onChange={e => setSourceFilter(e.target.value)}
+                    style={{ flex: 1, fontSize: '10px', padding: '3px 6px', border: '1px solid #ddd', borderRadius: '4px', fontFamily: 'monospace', minWidth: 0 }}
+                  />
+                  {sourceFilter && (
+                    <button onClick={() => setSourceFilter('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#aaa', fontSize: '12px', padding: 0, lineHeight: 1 }}>✕</button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  {sourcePaths.filter(p => !sourceFilter || p.toLowerCase().includes(sourceFilter.toLowerCase())).map(p => {
+                    const isUsed = usedPaths.has(p)
+                    return (
+                      <div
+                        key={p}
+                        draggable
+                        onDragStart={() => { dragRef.current = p }}
+                        onDragEnd={() => { dragRef.current = '' }}
+                        onClick={() => addFromCtx(p)}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: '3px',
+                          background: isUsed ? '#d1fae5' : '#dbeafe',
+                          border: `1px solid ${isUsed ? '#34d399' : '#93c5fd'}`,
+                          borderRadius: '4px', padding: '3px 7px',
+                          fontFamily: 'monospace', fontSize: '10px',
+                          color: isUsed ? '#065f46' : '#1e40af',
+                          cursor: 'grab', userSelect: 'none', opacity: isUsed ? 0.75 : 1,
+                        }}
+                        title="Drag onto a value field, or click to add as new variable"
+                      >
+                        {isUsed && <span style={{ fontSize: '9px' }}>✓</span>}
+                        {p}
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* RIGHT — Prompt Variables */}
+          <div style={{ flex: 1, padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Prompt Variables <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drop context keys onto values)</span>
+            </div>
+            <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+              Each variable becomes <code>{'{{var_name}}'}</code> in your prompt and system prompt.
+            </div>
+
+            {vars.map(({ key, value }, i) => {
+              const isOver = dragOverIdx === i
+              const isMapped = value.startsWith('{{') && value.endsWith('}}')
+              return (
+                <div
+                  key={i}
+                  onDragOver={e => { e.preventDefault(); setDragOverIdx(i) }}
+                  onDragLeave={() => setDragOverIdx(null)}
+                  onDrop={() => handleDrop(i)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    background: isOver ? '#dcfce7' : isMapped ? '#f0fdf4' : '#f8fafc',
+                    border: `1px dashed ${isOver ? '#22c55e' : isMapped ? '#86efac' : '#cbd5e1'}`,
+                    borderRadius: '4px', padding: '6px 8px', transition: 'background 0.1s, border-color 0.1s',
+                  }}
+                >
+                  <input
+                    value={key}
+                    onChange={e => updateKey(i, e.target.value)}
+                    placeholder="var_name"
+                    title="Used in prompt as {{var_name}}"
+                    style={{ flex: '0 0 110px', fontFamily: 'monospace', fontSize: '11px', padding: '4px 6px', border: '1px solid #e2e8f0', borderRadius: '3px', background: 'white' }}
+                  />
+                  <span style={{ color: '#bbb', fontSize: '11px', flexShrink: 0 }}>→</span>
+                  <input
+                    value={value}
+                    onChange={e => updateVal(i, e.target.value)}
+                    placeholder="{{context_key}} or literal value"
+                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '4px 6px', border: '1px solid #e2e8f0', borderRadius: '3px', background: isMapped ? '#f0fdf4' : 'white', color: isMapped ? '#0d9488' : '#334155', minWidth: 0 }}
+                  />
+                  <button onClick={() => removeRow(i)} style={{ flexShrink: 0, border: 'none', background: 'none', color: '#e74c3c', cursor: 'pointer', fontSize: '16px', padding: '0 2px', lineHeight: 1 }}>×</button>
+                </div>
+              )
+            })}
+
+            <button
+              onClick={addBlank}
+              style={{ alignSelf: 'flex-start', fontSize: '11px', padding: '4px 10px', border: '1px solid #d0d5dd', borderRadius: '4px', background: 'white', cursor: 'pointer', color: '#555' }}
+            >
+              + Add Variable
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', padding: '12px 20px', borderTop: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            style={{ padding: '8px 16px', background: '#7c3aed', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}
+          >
+            Apply Variables
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── GdriveTemplateVarsBuilderModal ────────────────────────────────────────────
+
+function GdriveTemplateVarsBuilderModal({ templateId, existingVars, onSave, onClose, defaultSourceJson = '' }: {
+  templateId: string
+  existingVars: Record<string, string>
+  onSave: (vars: Record<string, string>) => void
+  onClose: () => void
+  defaultSourceJson?: string
+}) {
+  const [loading, setLoading] = useState(false)
+  const [docContent, setDocContent] = useState('')
+  const [fetchError, setFetchError] = useState('')
+  const [sourceText, setSourceText] = useState(defaultSourceJson)
+  const [sourcePaths, setSourcePaths] = useState<string[]>([])
+  const [sourceParseError, setSourceParseError] = useState('')
+  const [sourceFilter, setSourceFilter] = useState('')
+  const [vars, setVars] = useState<Array<{ key: string; value: string }>>(
+    Object.entries(existingVars).map(([k, v]) => ({ key: k, value: v }))
+  )
+  const dragRef = useRef<string>('')
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+
+  // Fetch and parse template document on mount
+  useEffect(() => {
+    if (!templateId) {
+      setFetchError('No template selected')
+      return
+    }
+    setLoading(true)
+    setFetchError('')
+
+    // Fetch the document content from the backend
+    fetch(`/api/workflows/gdrive-content?file_id=${encodeURIComponent(templateId)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error) {
+          setFetchError(data.error)
+        } else {
+          const text = data.text || ''
+          setDocContent(text)
+          // Extract placeholders like {{field_name}}
+          const placeholderRegex = /\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}/g
+          const matches = new Set<string>()
+          let match
+          while ((match = placeholderRegex.exec(text)) !== null) {
+            matches.add(match[1])
+          }
+          // Convert to existing vars format if not already mapped
+          setVars(prev => {
+            const existing = new Set(prev.map(v => v.key))
+            const newVars = Array.from(matches)
+              .filter(key => !existing.has(key))
+              .map(key => ({ key, value: '' }))
+            return [...prev, ...newVars]
+          })
+        }
+        setLoading(false)
+      })
+      .catch(err => {
+        setFetchError(err.message)
+        setLoading(false)
+      })
+  }, [templateId])
+
+  useEffect(() => {
+    if (!defaultSourceJson || defaultSourceJson.trim() === '' || defaultSourceJson.trim() === '{}') return
+    try {
+      const parsed = JSON.parse(defaultSourceJson)
+      const out: string[] = []
+      collectLeafPaths(parsed, '', 0, out)
+      setSourcePaths(out.filter(p => p !== ''))
+    } catch { /* ignore */ }
+  }, [defaultSourceJson])
+
+  const parseSource = () => {
+    setSourceParseError('')
+    setSourcePaths([])
+    let parsed: unknown
+    try { parsed = JSON.parse(sourceText) } catch { setSourceParseError('Invalid JSON.'); return }
+    const out: string[] = []
+    collectLeafPaths(parsed, '', 0, out)
+    setSourcePaths(out.filter(p => p !== ''))
+  }
+
+  const addBlank = () => setVars(v => [...v, { key: `var${v.length + 1}`, value: '' }])
+
+  const addFromCtx = (path: string) => {
+    if (!path) return
+    const lastSeg = path.split('.').pop() ?? path
+    const varName = lastSeg.replace(/[^a-zA-Z0-9_]/g, '_')
+    const key = vars.some(r => r.key === varName) ? path.replace(/\./g, '_') : varName
+    setVars(v => [...v, { key, value: `{{${path}}}` }])
+  }
+
+  const updateKey = (i: number, k: string) => setVars(v => v.map((r, idx) => idx === i ? { ...r, key: k } : r))
+  const updateVal = (i: number, val: string) => setVars(v => v.map((r, idx) => idx === i ? { ...r, value: val } : r))
+  const removeRow = (i: number) => setVars(v => v.filter((_, idx) => idx !== i))
+
+  const handleDrop = (i: number) => {
+    const from = dragRef.current
+    if (!from) return
+    updateVal(i, `{{${from}}}`)
+    setDragOverIdx(null)
+  }
+
+  const usedPaths = new Set(
+    vars.map(r => { const m = r.value.match(/^\{\{(.+)\}\}$/); return m ? m[1] : null }).filter(Boolean) as string[]
+  )
+
+  const save = () => {
+    const result: Record<string, string> = {}
+    for (const { key, value } of vars) {
+      if (key.trim()) result[key.trim()] = value
+    }
+    onSave(result)
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '860px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: '#1e293b', color: 'white' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: '15px' }}>Template Variables Builder</div>
+            <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>Map document placeholders {'{{field_name}}'} to context values</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#94a3b8', lineHeight: 1 }}>✕</button>
+        </div>
+
+        {loading ? (
+          <div style={{ padding: '40px', textAlign: 'center', color: '#666' }}>Loading document...</div>
+        ) : fetchError ? (
+          <div style={{ padding: '20px', color: '#e74c3c', fontSize: '13px' }}>{fetchError}</div>
+        ) : (
+          <div style={{ flex: 1, overflow: 'auto', display: 'flex', gap: 0, minHeight: 0 }}>
+
+            {/* LEFT — Context Keys */}
+            <div style={{ flex: '0 0 300px', borderRight: '1px solid #e0e6ed', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Context Keys <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag onto values)</span>
+              </div>
+              <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+                Paste sample JSON from a previous node, then click Parse Keys.
+              </div>
+              <textarea
+                value={sourceText}
+                onChange={e => setSourceText(e.target.value)}
+                rows={6}
+                placeholder={'{\n  "first_name": "Jane",\n  "last_name": "Smith",\n  "email": "jane@example.com"\n}'}
+                spellCheck={false}
+                style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+              />
+              {sourceParseError && <div style={{ color: '#e74c3c', fontSize: '11px' }}>{sourceParseError}</div>}
+              <button
+                onClick={parseSource}
+                style={{ padding: '5px', background: '#3b82f6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}
+              >
+                Parse Keys
+              </button>
+
+              {sourcePaths.length > 0 && (
+                <>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                    <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', whiteSpace: 'nowrap' }}>SOURCE KEYS:</div>
+                    <input
+                      type="text"
+                      placeholder="filter..."
+                      value={sourceFilter}
+                      onChange={e => setSourceFilter(e.target.value)}
+                      style={{ flex: 1, fontSize: '10px', padding: '3px 6px', border: '1px solid #ddd', borderRadius: '4px', fontFamily: 'monospace', minWidth: 0 }}
+                    />
+                    {sourceFilter && (
+                      <button onClick={() => setSourceFilter('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#aaa', fontSize: '12px', padding: 0, lineHeight: 1 }}>✕</button>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                    {sourcePaths.filter(p => !sourceFilter || p.toLowerCase().includes(sourceFilter.toLowerCase())).map(p => {
+                      const isUsed = usedPaths.has(p)
+                      return (
+                        <div
+                          key={p}
+                          draggable
+                          onDragStart={() => { dragRef.current = p }}
+                          onDragEnd={() => { dragRef.current = '' }}
+                          onClick={() => addFromCtx(p)}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '3px',
+                            background: isUsed ? '#d1fae5' : '#dbeafe',
+                            border: `1px solid ${isUsed ? '#34d399' : '#93c5fd'}`,
+                            borderRadius: '4px', padding: '3px 7px',
+                            fontFamily: 'monospace', fontSize: '10px',
+                            color: isUsed ? '#065f46' : '#1e40af',
+                            cursor: 'grab', userSelect: 'none', opacity: isUsed ? 0.75 : 1,
+                          }}
+                          title="Drag onto a value field, or click to add as new variable"
+                        >
+                          {isUsed && <span style={{ fontSize: '9px' }}>✓</span>}
+                          {p}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* RIGHT — Template Variables */}
+            <div style={{ flex: 1, padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+              <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Template Placeholders <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drop context keys onto values)</span>
+              </div>
+              <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+                Each variable becomes <code>{'{{field_name}}'}</code> in the document and gets replaced with a context value.
+              </div>
+
+              {vars.map(({ key, value }, i) => {
+                const isOver = dragOverIdx === i
+                const isMapped = value.startsWith('{{') && value.endsWith('}}')
+                return (
+                  <div
+                    key={i}
+                    onDragOver={e => { e.preventDefault(); setDragOverIdx(i) }}
+                    onDragLeave={() => setDragOverIdx(null)}
+                    onDrop={() => handleDrop(i)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '6px',
+                      background: isOver ? '#dcfce7' : isMapped ? '#f0fdf4' : '#f8fafc',
+                      border: `1px dashed ${isOver ? '#22c55e' : isMapped ? '#86efac' : '#cbd5e1'}`,
+                      borderRadius: '4px', padding: '6px 8px', transition: 'background 0.1s, border-color 0.1s',
+                    }}
+                  >
+                    <input
+                      value={key}
+                      onChange={e => updateKey(i, e.target.value)}
+                      placeholder="var_name"
+                      title="Used in document as {{var_name}}"
+                      style={{ flex: '0 0 110px', fontFamily: 'monospace', fontSize: '11px', padding: '4px 6px', border: '1px solid #e2e8f0', borderRadius: '3px', background: 'white' }}
+                    />
+                    <span style={{ color: '#bbb', fontSize: '11px', flexShrink: 0 }}>→</span>
+                    <input
+                      value={value}
+                      onChange={e => updateVal(i, e.target.value)}
+                      placeholder="{{context_key}} or literal value"
+                      style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '4px 6px', border: '1px solid #e2e8f0', borderRadius: '3px', background: isMapped ? '#f0fdf4' : 'white', color: isMapped ? '#0d9488' : '#334155', minWidth: 0 }}
+                    />
+                    <button onClick={() => removeRow(i)} style={{ flexShrink: 0, border: 'none', background: 'none', color: '#e74c3c', cursor: 'pointer', fontSize: '16px', padding: '0 2px', lineHeight: 1 }}>×</button>
+                  </div>
+                )
+              })}
+
+              <button
+                onClick={addBlank}
+                style={{ alignSelf: 'flex-start', fontSize: '11px', padding: '4px 10px', border: '1px solid #d0d5dd', borderRadius: '4px', background: 'white', cursor: 'pointer', color: '#555' }}
+              >
+                + Add Variable
+              </button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', padding: '12px 20px', borderTop: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            disabled={loading}
+            style={{ padding: '8px 16px', background: loading ? '#ccc' : '#06b6d4', color: 'white', border: 'none', borderRadius: '4px', cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 600, fontSize: '13px' }}
+          >
+            Apply Variables
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1865,6 +2395,14 @@ function HttpBodyBuilderModal({ existingBody, onSave, onClose, defaultSourceJson
                   const isOver = dragOverPath === leaf.path
                   const valStr = String(leaf.value ?? '')
                   const isMapped = valStr.startsWith('{{') && valStr.endsWith('}}')
+                  const updateLeafValue = (newVal: string) => {
+                    const updated = setLeafValue(bodyObj, leaf.path, newVal)
+                    setBodyObj(updated)
+                    setBodyText(JSON.stringify(updated, null, 2))
+                    const out: Array<{ path: string; value: unknown }> = []
+                    collectLeafPathsWithValues(updated, '', 0, out)
+                    setBodyLeaves(out.filter(l => l.path !== ''))
+                  }
                   return (
                     <div
                       key={leaf.path}
@@ -1872,22 +2410,31 @@ function HttpBodyBuilderModal({ existingBody, onSave, onClose, defaultSourceJson
                       onDragLeave={() => setDragOverPath(null)}
                       onDrop={() => handleDrop(leaf.path)}
                       style={{
-                        display: 'flex', alignItems: 'center', gap: '8px',
+                        display: 'flex', alignItems: 'center', gap: '6px',
                         background: isOver ? '#dcfce7' : isMapped ? '#f0fdf4' : '#f8fafc',
                         border: `1px dashed ${isOver ? '#22c55e' : isMapped ? '#86efac' : '#cbd5e1'}`,
-                        borderRadius: '4px', padding: '5px 10px', transition: 'background 0.1s, border-color 0.1s',
+                        borderRadius: '4px', padding: '5px 8px', transition: 'background 0.1s, border-color 0.1s',
                         minHeight: '32px',
                       }}
                     >
-                      <code style={{ fontSize: '11px', color: '#334155', flex: '0 0 auto', minWidth: '100px' }}>{leaf.path}</code>
-                      <span style={{ flex: 1, fontSize: '11px', fontFamily: 'monospace' }}>
-                        {isMapped
-                          ? <span style={{ color: '#0d9488', fontWeight: 600 }}>{valStr}</span>
-                          : isOver
-                            ? <span style={{ color: '#16a34a' }}>drop here</span>
-                            : <span style={{ color: '#94a3b8' }}>{valStr || 'drop here ▼'}</span>
-                        }
-                      </span>
+                      <code style={{ fontSize: '11px', color: '#334155', flex: '0 0 auto', minWidth: '90px' }}>{leaf.path}</code>
+                      <input
+                        value={valStr}
+                        onChange={e => updateLeafValue(e.target.value)}
+                        placeholder="value or {{key}}"
+                        style={{ flex: 1, fontFamily: 'monospace', fontSize: '10px', padding: '3px 5px', border: '1px solid #e2e8f0', borderRadius: '3px', background: isMapped ? '#f0fdf4' : 'white', color: isMapped ? '#0d9488' : '#334155', minWidth: 0 }}
+                      />
+                      {sourcePaths.length > 0 && (
+                        <select
+                          value=""
+                          onChange={e => { if (e.target.value) updateLeafValue(`{{${e.target.value}}}`) }}
+                          style={{ fontSize: '10px', padding: '3px 4px', border: '1px solid #e2e8f0', borderRadius: '3px', background: 'white', color: '#555', flexShrink: 0, maxWidth: '110px' }}
+                          title="Pick a context variable"
+                        >
+                          <option value="">+ var</option>
+                          {sourcePaths.map(p => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      )}
                     </div>
                   )
                 })}
@@ -1913,6 +2460,255 @@ function HttpBodyBuilderModal({ existingBody, onSave, onClose, defaultSourceJson
           >
             Apply Body
           </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── TextSubstBuilderModal ─────────────────────────────────────────────────────
+
+function TextSubstBuilderModal({ existingVars, onSave, onClose, defaultSourceJson = '' }: {
+  existingVars: Record<string, string>
+  onSave: (vars: Record<string, string>) => void
+  onClose: () => void
+  defaultSourceJson?: string
+}) {
+  const [sourcePaths, setSourcePaths] = useState<string[]>([])
+  const [sourceFilter, setSourceFilter] = useState('')
+  // context key whose value contains the template text
+  const [templateKey, setTemplateKey] = useState('content')
+  const [rows, setRows] = useState<Array<{ key: string; value: string }>>(() =>
+    Object.entries(existingVars).map(([k, v]) => ({ key: k, value: v }))
+  )
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+  const dragRef = useRef<string>('')
+
+  // Auto-parse debug context into leaf paths + auto-parse template vars if rows are empty
+  useEffect(() => {
+    if (!defaultSourceJson || defaultSourceJson.trim() === '' || defaultSourceJson.trim() === '{}') return
+    try {
+      const parsed = JSON.parse(defaultSourceJson)
+      const out: string[] = []
+      collectLeafPaths(parsed, '', 0, out)
+      const paths = out.filter(p => p !== '')
+      setSourcePaths(paths)
+      // Set templateKey to first available path if current default isn't in context
+      setTemplateKey(prev => paths.includes(prev) ? prev : (paths[0] ?? prev))
+      // Auto-discover template vars from the best template key if no rows yet
+      if (Object.keys(existingVars).length === 0) {
+        const key = paths.includes('content') ? 'content' : paths[0]
+        if (key && typeof parsed[key] === 'string') parseVarsFromText(parsed[key])
+      }
+    } catch { /* ignore */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultSourceJson])
+
+  const [parseMsg, setParseMsg] = useState('')
+
+  const getByPath = (obj: Record<string, unknown>, path: string): unknown => {
+    return path.split('.').reduce<unknown>((cur, seg) => {
+      if (cur == null || typeof cur !== 'object') return undefined
+      return (cur as Record<string, unknown>)[seg]
+    }, obj)
+  }
+
+  const parseVarsFromText = (text: string): number => {
+    const regex = /\{\{\s*([^}]+?)\s*\}\}/g
+    const found = new Set<string>()
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(text)) !== null) {
+      // Strip markdown escape backslashes (e.g. about\_your\_business → about_your_business)
+      const name = m[1].replace(/\\/g, '')
+      if (name) found.add(name)
+    }
+    setRows(prev => {
+      const existing = new Map(prev.map(r => [r.key, r.value]))
+      const merged = [...prev]
+      for (const k of found) {
+        if (!existing.has(k)) merged.push({ key: k, value: '' })
+      }
+      return merged
+    })
+    return found.size
+  }
+
+  const parseFromContext = () => {
+    setParseMsg('')
+    let ctx: Record<string, unknown>
+    try { ctx = JSON.parse(defaultSourceJson) } catch { setParseMsg('Debug context is empty — step through the previous node first.'); return }
+    const text = getByPath(ctx, templateKey)
+    if (typeof text !== 'string') { setParseMsg(`"${templateKey}" is not a string in context — pick a different key.`); return }
+    const count = parseVarsFromText(text)
+    setParseMsg(count > 0 ? `Found ${count} variable${count === 1 ? '' : 's'}.` : 'No {{variable}} tokens found in that field.')
+  }
+
+  const updateVal = (i: number, val: string) => setRows(v => v.map((r, idx) => idx === i ? { ...r, value: val } : r))
+  const updateKey = (i: number, k: string) => setRows(v => v.map((r, idx) => idx === i ? { ...r, key: k } : r))
+  const removeRow = (i: number) => setRows(v => v.filter((_, idx) => idx !== i))
+
+  const handleDrop = (i: number) => {
+    const from = dragRef.current
+    if (!from) return
+    updateVal(i, `{{${from}}}`)
+    setDragOverIdx(null)
+  }
+
+  const usedPaths = new Set(
+    rows.map(r => { const m = r.value.match(/^\{\{(.+)\}\}$/); return m ? m[1] : null }).filter(Boolean) as string[]
+  )
+
+  const save = () => {
+    const result: Record<string, string> = {}
+    for (const { key, value } of rows) {
+      if (key.trim()) result[key.trim()] = value
+    }
+    onSave(result)
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '860px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: '#1e293b', color: 'white' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: '15px' }}>Text Substitution Builder</div>
+            <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>Drag context keys onto {'{{placeholder}}'} tokens from your document</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#94a3b8', lineHeight: 1 }}>✕</button>
+        </div>
+
+        <div style={{ flex: 1, overflow: 'auto', display: 'flex', gap: 0, minHeight: 0 }}>
+
+          {/* LEFT — Context Keys (from debug context) */}
+          <div style={{ flex: '0 0 280px', borderRight: '1px solid #e0e6ed', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Context Keys <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag onto placeholders)</span>
+            </div>
+            {sourcePaths.length === 0 && (
+              <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+                Step through the debug panel first to populate context keys.
+              </div>
+            )}
+            {sourcePaths.length > 0 && (
+              <>
+                <input
+                  type="text"
+                  placeholder="filter..."
+                  value={sourceFilter}
+                  onChange={e => setSourceFilter(e.target.value)}
+                  style={{ fontSize: '10px', padding: '4px 6px', border: '1px solid #ddd', borderRadius: '4px', fontFamily: 'monospace' }}
+                />
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  {sourcePaths.filter(p => !sourceFilter || p.toLowerCase().includes(sourceFilter.toLowerCase())).map(p => {
+                    const isUsed = usedPaths.has(p)
+                    return (
+                      <div
+                        key={p}
+                        draggable
+                        onDragStart={() => { dragRef.current = p }}
+                        onDragEnd={() => { dragRef.current = '' }}
+                        style={{
+                          display: 'inline-flex', alignItems: 'center', gap: '3px',
+                          background: isUsed ? '#d1fae5' : '#dbeafe',
+                          border: `1px solid ${isUsed ? '#34d399' : '#93c5fd'}`,
+                          borderRadius: '4px', padding: '3px 7px',
+                          fontFamily: 'monospace', fontSize: '10px',
+                          color: isUsed ? '#065f46' : '#1e40af',
+                          cursor: 'grab', userSelect: 'none', opacity: isUsed ? 0.75 : 1,
+                        }}
+                      >
+                        {isUsed && <span style={{ fontSize: '9px' }}>✓</span>}
+                        {p}
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* RIGHT — Document placeholders */}
+          <div style={{ flex: 1, padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+
+            {/* Parse from context */}
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Document Placeholders
+            </div>
+            <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+              Pick the context key that holds your document, then click Parse to extract {'{{placeholder}}'} tokens.
+            </div>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              {sourcePaths.length > 0 ? (
+                <select
+                  value={templateKey}
+                  onChange={e => setTemplateKey(e.target.value)}
+                  style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '5px 6px', border: '1px solid #ddd', borderRadius: '4px' }}
+                >
+                  {sourcePaths.map(p => <option key={p} value={p}>{p}</option>)}
+                </select>
+              ) : (
+                <input
+                  value={templateKey}
+                  onChange={e => setTemplateKey(e.target.value)}
+                  placeholder="e.g. content"
+                  style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '5px 6px', border: '1px solid #ddd', borderRadius: '4px' }}
+                />
+              )}
+              <button
+                onClick={parseFromContext}
+                style={{ padding: '5px 12px', background: '#0ea5e9', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px', whiteSpace: 'nowrap' }}
+              >
+                Parse Variables
+              </button>
+            </div>
+
+            {parseMsg && (
+              <div style={{ fontSize: '11px', color: parseMsg.startsWith('Found') ? '#16a34a' : '#e74c3c', padding: '4px 0' }}>
+                {parseMsg}
+              </div>
+            )}
+
+            {/* Variable rows — placeholder → drop target */}
+            {rows.length > 0 && (
+              <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px', marginTop: '4px', borderTop: '1px solid #e0e6ed', paddingTop: '8px' }}>
+                Substitutions <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag context keys onto each field)</span>
+              </div>
+            )}
+
+            {rows.map(({ key, value }, i) => {
+              const isOver = dragOverIdx === i
+              const isMapped = value !== ''
+              return (
+                <div
+                  key={i}
+                  onDragOver={e => { e.preventDefault(); setDragOverIdx(i) }}
+                  onDragLeave={() => setDragOverIdx(null)}
+                  onDrop={() => handleDrop(i)}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    background: isOver ? '#dcfce7' : isMapped ? '#f0fdf4' : '#f8fafc',
+                    border: `1px dashed ${isOver ? '#22c55e' : isMapped ? '#86efac' : '#cbd5e1'}`,
+                    borderRadius: '4px', padding: '6px 8px', transition: 'background 0.1s, border-color 0.1s',
+                  }}
+                >
+                  <span style={{ flex: '0 0 160px', fontFamily: 'monospace', fontSize: '11px', color: '#334155', padding: '4px 0' }}>{`{{${key}}}`}</span>
+                  <span style={{ color: '#bbb', fontSize: '11px', flexShrink: 0 }}>→</span>
+                  <input
+                    value={value}
+                    onChange={e => updateVal(i, e.target.value)}
+                    placeholder="drop a context key here"
+                    style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '4px 6px', border: '1px solid #e2e8f0', borderRadius: '3px', background: isMapped ? '#f0fdf4' : 'white', color: isMapped ? '#0d9488' : '#334155', minWidth: 0 }}
+                  />
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', padding: '12px 20px', borderTop: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>Cancel</button>
+          <button onClick={save} style={{ padding: '8px 16px', background: '#0ea5e9', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}>Apply Substitutions</button>
         </div>
       </div>
     </div>
@@ -1953,6 +2749,9 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
   const [llmModelsLoading, setLlmModelsLoading] = useState(false)
   // state for the "add from context" dropdown in the prompt vars mapper
   const [llmAddVarCtxKey, setLlmAddVarCtxKey] = useState('')
+  // refs for inserting context vars directly into prompt textareas
+  const systemPromptRef = useRef<HTMLTextAreaElement>(null)
+  const promptRef = useRef<HTMLTextAreaElement>(null)
 
   const fetchLlmModels = useCallback(async () => {
     setLlmModelsLoading(true)
@@ -1976,6 +2775,9 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
 
   // HTTP Body Builder state
   const [showHttpBodyBuilder, setShowHttpBodyBuilder] = useState(false)
+  const [showPromptVarsBuilder, setShowPromptVarsBuilder] = useState(false)
+  const [showTextSubstBuilder, setShowTextSubstBuilder] = useState(false)
+  const [showGdriveTemplateVarsBuilder, setShowGdriveTemplateVarsBuilder] = useState(false)
   const [showPbDataMapper, setShowPbDataMapper] = useState(false)
   const [showPbQueryBuilder, setShowPbQueryBuilder] = useState(false)
   const [showPbUpsertWhereBuilder, setShowPbUpsertWhereBuilder] = useState(false)
@@ -2004,6 +2806,8 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
   const isHttpRequest = node.activityName === 'http_request'
   const isMapper = node.activityName === 'mapper'
   const isLlm = node.activityName === 'llm_prompt'
+  const isTextSubst = node.activityName === 'text_substitute'
+  const isGdriveFillTemplate = node.activityName === 'gdrive_fill_template'
 
   // Parse validity for mapper button enable
   const mapperSourceValid = (() => { try { JSON.parse(mapperSourceJson); return mapperSourceJson.trim() !== ''; } catch { return false } })()
@@ -2189,7 +2993,12 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
                   <span style={{ fontSize: '11px', fontWeight: 700, color: '#444' }}>
                     Prompt Variables
                   </span>
-                  <span style={{ fontSize: '10px', color: '#aaa' }}>maps context → {'{{var}}'} in prompt</span>
+                  <button
+                    onClick={() => setShowPromptVarsBuilder(true)}
+                    style={{ fontSize: '10px', padding: '3px 8px', background: '#7c3aed', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600 }}
+                  >
+                    Build Vars
+                  </button>
                 </div>
                 {rows.map(([k, v]) => (
                   <div key={k} style={{ display: 'flex', gap: '4px', alignItems: 'center', marginBottom: '3px' }}>
@@ -2233,27 +3042,79 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
             )
           })()}
 
-          <label style={labelStyle}>System Prompt</label>
-          <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>Supports {'{{key}}'} and prompt variable interpolation</div>
-          <textarea
-            value={(node.staticInput ?? {}).system_prompt ?? ''}
-            onChange={e => setInput('system_prompt', e.target.value)}
-            rows={3}
-            placeholder="You are a helpful assistant analyzing {{contact.first_name}}..."
-            spellCheck={false}
-            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '5px 7px', border: '1px solid #e0e6ed', borderRadius: '4px', resize: 'vertical', marginBottom: '2px' }}
-          />
+          {(() => {
+            const contextPaths: string[] = (() => {
+              try {
+                const ctx = JSON.parse(debugContext || '{}')
+                const out: string[] = []
+                collectLeafPaths(ctx, '', 0, out)
+                return out.filter(p => p !== '' && !p.startsWith('_'))
+              } catch { return [] }
+            })()
 
-          <label style={labelStyle}>Prompt <span style={{ color: '#e74c3c' }}>*</span></label>
-          <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>Supports {'{{key}}'} template interpolation</div>
-          <textarea
-            value={(node.staticInput ?? {}).prompt ?? ''}
-            onChange={e => setInput('prompt', e.target.value)}
-            rows={4}
-            placeholder={'Summarize this contact: {{contact.first_name}} {{contact.last_name}}'}
-            spellCheck={false}
-            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '5px 7px', border: '1px solid #e0e6ed', borderRadius: '4px', resize: 'vertical', marginBottom: '2px' }}
-          />
+            const insertAtCursor = (
+              ref: React.RefObject<HTMLTextAreaElement | null>,
+              field: string,
+              key: string,
+            ) => {
+              const tag = `{{${key}}}`
+              const el = ref.current
+              if (el) {
+                const start = el.selectionStart ?? el.value.length
+                const end = el.selectionEnd ?? el.value.length
+                const next = el.value.slice(0, start) + tag + el.value.slice(end)
+                setInput(field, next)
+                requestAnimationFrame(() => {
+                  el.focus()
+                  el.setSelectionRange(start + tag.length, start + tag.length)
+                })
+              } else {
+                setInput(field, ((node.staticInput ?? {})[field] ?? '') + tag)
+              }
+            }
+
+            const CtxInsert = ({ field, ref: tRef }: { field: string; ref: React.RefObject<HTMLTextAreaElement | null> }) =>
+              contextPaths.length > 0 ? (
+                <select
+                  value=""
+                  onChange={e => { if (e.target.value) insertAtCursor(tRef, field, e.target.value) }}
+                  style={{ ...inputStyle, fontSize: '10px', marginBottom: '6px', color: '#555' }}
+                >
+                  <option value="">+ insert context var…</option>
+                  {contextPaths.map(p => <option key={p} value={p}>{`{{${p}}}`}</option>)}
+                </select>
+              ) : null
+
+            return (
+              <>
+                <label style={labelStyle}>System Prompt</label>
+                <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>Supports {'{{key}}'} and prompt variable interpolation</div>
+                <textarea
+                  ref={systemPromptRef}
+                  value={(node.staticInput ?? {}).system_prompt ?? ''}
+                  onChange={e => setInput('system_prompt', e.target.value)}
+                  rows={3}
+                  placeholder="You are a helpful assistant analyzing {{contact.first_name}}..."
+                  spellCheck={false}
+                  style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '5px 7px', border: '1px solid #e0e6ed', borderRadius: '4px', resize: 'vertical', marginBottom: '2px' }}
+                />
+                <CtxInsert field="system_prompt" ref={systemPromptRef} />
+
+                <label style={labelStyle}>Prompt <span style={{ color: '#e74c3c' }}>*</span></label>
+                <div style={{ fontSize: '10px', color: '#aaa', marginBottom: '2px' }}>Supports {'{{key}}'} template interpolation</div>
+                <textarea
+                  ref={promptRef}
+                  value={(node.staticInput ?? {}).prompt ?? ''}
+                  onChange={e => setInput('prompt', e.target.value)}
+                  rows={4}
+                  placeholder={'Summarize this contact: {{contact.first_name}} {{contact.last_name}}'}
+                  spellCheck={false}
+                  style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '5px 7px', border: '1px solid #e0e6ed', borderRadius: '4px', resize: 'vertical', marginBottom: '2px' }}
+                />
+                <CtxInsert field="prompt" ref={promptRef} />
+              </>
+            )
+          })()}
 
           <div style={{ display: 'flex', gap: '8px' }}>
             <div style={{ flex: 1 }}>
@@ -2329,6 +3190,32 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
                   Build Body
                 </button>
               )}
+              {isTextSubst && f.name === 'vars' && (
+                <button
+                  onClick={() => setShowTextSubstBuilder(true)}
+                  style={{
+                    display: 'block', width: '100%', marginBottom: '4px',
+                    padding: '5px 10px', background: '#0ea5e9', color: 'white',
+                    border: 'none', borderRadius: '4px', cursor: 'pointer',
+                    fontWeight: 600, fontSize: '11px', textAlign: 'left',
+                  }}
+                >
+                  Build Substitutions
+                </button>
+              )}
+              {isGdriveFillTemplate && f.name === 'vars' && (
+                <button
+                  onClick={() => setShowGdriveTemplateVarsBuilder(true)}
+                  style={{
+                    display: 'block', width: '100%', marginBottom: '4px',
+                    padding: '5px 10px', background: '#06b6d4', color: 'white',
+                    border: 'none', borderRadius: '4px', cursor: 'pointer',
+                    fontWeight: 600, fontSize: '11px', textAlign: 'left',
+                  }}
+                >
+                  Build Template Variables
+                </button>
+              )}
               {f.options && f.options.length > 0 ? (
                 <select
                   value={(node.staticInput ?? {})[f.name] ?? ''}
@@ -2344,8 +3231,7 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
                   displayName={(node.staticInput ?? {})[f.name + '_name'] ?? ''}
                   mode={f.type === 'gdrive_folder' ? 'folder' : 'file'}
                   onSelect={(id, name) => {
-                    setInput(f.name, id)
-                    setInput(f.name + '_name', name)
+                    set({ staticInput: { ...(node.staticInput ?? {}), [f.name]: id, [f.name + '_name']: name } })
                   }}
                 />
               ) : (
@@ -2529,6 +3415,43 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
             setShowHttpBodyBuilder(false)
           }}
           onClose={() => setShowHttpBodyBuilder(false)}
+        />
+      )}
+
+      {isLlm && showPromptVarsBuilder && (
+        <PromptVarsBuilderModal
+          existingVars={(() => { try { return JSON.parse((node.staticInput ?? {}).prompt_vars ?? '{}') } catch { return {} } })()}
+          defaultSourceJson={debugContext}
+          onSave={vars => {
+            setInput('prompt_vars', JSON.stringify(vars))
+            setShowPromptVarsBuilder(false)
+          }}
+          onClose={() => setShowPromptVarsBuilder(false)}
+        />
+      )}
+
+      {isTextSubst && showTextSubstBuilder && (
+        <TextSubstBuilderModal
+          existingVars={(() => { try { return JSON.parse((node.staticInput ?? {}).vars ?? '{}') } catch { return {} } })()}
+          defaultSourceJson={debugContext}
+          onSave={vars => {
+            setInput('vars', JSON.stringify(vars))
+            setShowTextSubstBuilder(false)
+          }}
+          onClose={() => setShowTextSubstBuilder(false)}
+        />
+      )}
+
+      {isGdriveFillTemplate && showGdriveTemplateVarsBuilder && (
+        <GdriveTemplateVarsBuilderModal
+          templateId={(node.staticInput ?? {}).template_id ?? ''}
+          existingVars={(() => { try { return JSON.parse((node.staticInput ?? {}).vars ?? '{}') } catch { return {} } })()}
+          defaultSourceJson={debugContext}
+          onSave={vars => {
+            setInput('vars', JSON.stringify(vars))
+            setShowGdriveTemplateVarsBuilder(false)
+          }}
+          onClose={() => setShowGdriveTemplateVarsBuilder(false)}
         />
       )}
 
@@ -3269,6 +4192,7 @@ export default function WorkflowBuilder() {
               const ai = catOrder.indexOf(a), bi = catOrder.indexOf(b)
               return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi)
             })
+            sorted.forEach(([, acts]) => acts.sort((a, b) => a.name.localeCompare(b.name)))
             return sorted.map(([cat, acts], i) => (
               <CategoryGroup
                 key={cat}

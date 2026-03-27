@@ -6,10 +6,13 @@ data/
 
 # Environment files
 .env
+.env.*
 
 # Go binaries (at root only)
 /platform-starter
 /app
+/cosmicbizwitch
+/cosmicbizwitch.pid
 
 # Go build cache
 *.test
