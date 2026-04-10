@@ -64,6 +64,24 @@ func (s *Server) handleTriggerDelete(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, map[string]any{"deleted": id})
 }
 
+// handleTriggerFire fires a trigger by its ID — public endpoint, no auth required.
+// POST /trigger/{id}
+// The JSON body (if any) is merged into the workflow context as the initial payload.
+func (s *Server) handleTriggerFire(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var payload map[string]any
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	wf, err := s.triggers.FireByID(r.Context(), id, payload)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"workflow_id": wf.ID, "status": wf.Status})
+}
+
 // handleWebhook is the public endpoint — no auth required.
 // POST /webhooks/{token}
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {

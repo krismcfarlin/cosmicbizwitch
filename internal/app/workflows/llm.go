@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"cosmicbizwitch/pkg/workflow"
@@ -95,9 +96,10 @@ func registerLLMActivity(eng *workflow.Engine, app core.App, logger *log.Logger)
 				responseText, err = callAnthropic(apiKey, modelID, systemPrompt, prompt, temperature, maxTokens)
 
 			case strings.HasPrefix(model, "openrouter/"):
-				apiKey := llmGetSetting(app, "OPENROUTER_API_KEY")
+				keyName := llmString(input, "api_key_name")
+				apiKey := llmGetOpenRouterKey(app, keyName)
 				if apiKey == "" {
-					return nil, fmt.Errorf("llm_prompt: OPENROUTER_API_KEY not configured in settings")
+					return nil, fmt.Errorf("llm_prompt: no OpenRouter API key configured (set OPENROUTER_KEYS or OPENROUTER_API_KEY in Settings)")
 				}
 				modelID := strings.TrimPrefix(model, "openrouter/")
 				responseText, err = callOpenRouter(apiKey, modelID, systemPrompt, prompt, temperature, maxTokens)
@@ -118,12 +120,14 @@ func registerLLMActivity(eng *workflow.Engine, app core.App, logger *log.Logger)
 				return nil, fmt.Errorf("llm_prompt: %w", err)
 			}
 
-			out := map[string]any{resultKey: responseText}
+			// Try to extract and parse a JSON object or array from the response.
+			// Handles: plain JSON, markdown code fences, and prose surrounding JSON.
+			parsedResult := extractJSON(responseText)
+			out := map[string]any{resultKey: parsedResult}
 
-			// If json_output_fields was set, parse the response as JSON and merge fields.
+			// If json_output_fields was set, also merge individual fields from the parsed map.
 			if len(jsonFields) > 0 {
-				var parsed map[string]any
-				if jsonErr := json.Unmarshal([]byte(responseText), &parsed); jsonErr == nil {
+				if parsed, ok := parsedResult.(map[string]any); ok {
 					for _, f := range jsonFields {
 						if v, ok := parsed[f]; ok {
 							out[f] = v
@@ -146,6 +150,7 @@ func registerLLMActivity(eng *workflow.Engine, app core.App, logger *log.Logger)
 				{Name: "max_tokens", Type: "number", Description: "Maximum tokens in the response. Defaults to 1024."},
 				{Name: "result_key", Type: "string", Description: "Context key to store the response under. Defaults to 'llm_response'."},
 				{Name: "json_output_fields", Type: "list", Description: "Optional list of JSON field names to request in the response. When set, appends a JSON formatting instruction to the prompt and parses the response fields into the workflow context."},
+				{Name: "api_key_name", Type: "string", Description: "Named OpenRouter API key to use (from Settings → OpenRouter Keys). Leave empty to use the default key."},
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "llm_response", Type: "string", Description: "The raw LLM text response (stored under result_key if specified)."},
@@ -345,6 +350,31 @@ func callOpenAI(apiKey, model, system, prompt string, temperature float64, maxTo
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// llmGetOpenRouterKey returns the OpenRouter API key for the given name.
+// If name is empty, falls back to the legacy OPENROUTER_API_KEY setting.
+func llmGetOpenRouterKey(app core.App, name string) string {
+	// Try named keys first
+	keysJSON := llmGetSetting(app, "OPENROUTER_KEYS")
+	if keysJSON != "" {
+		var keys []struct {
+			Name string `json:"name"`
+			Key  string `json:"key"`
+		}
+		if err := json.Unmarshal([]byte(keysJSON), &keys); err == nil {
+			if name == "" && len(keys) > 0 {
+				return keys[0].Key // default: first key
+			}
+			for _, k := range keys {
+				if strings.EqualFold(k.Name, name) {
+					return k.Key
+				}
+			}
+		}
+	}
+	// Fall back to legacy single key
+	return llmGetSetting(app, "OPENROUTER_API_KEY")
+}
+
 func llmGetSetting(app core.App, key string) string {
 	records, err := app.FindRecordsByFilter("app_settings", "key = {:key}", "", 1, 0, dbx.Params{"key": key})
 	if err != nil || len(records) == 0 {
@@ -371,6 +401,10 @@ func llmFloat(input map[string]any, key string, def float64) float64 {
 			return float64(n)
 		case int:
 			return float64(n)
+		case string:
+			if f, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
+				return f
+			}
 		}
 	}
 	return def
@@ -383,6 +417,10 @@ func llmInt(input map[string]any, key string, def int) int {
 			return int(n)
 		case int:
 			return n
+		case string:
+			if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
+				return i
+			}
 		}
 	}
 	return def
@@ -406,6 +444,48 @@ func llmStringMap(input map[string]any, key string) map[string]string {
 		}
 	}
 	return result
+}
+
+// extractJSON tries to parse a JSON value from an LLM response string.
+// It handles markdown code fences (```json...```) and prose surrounding JSON.
+// Returns the parsed value on success, or the original string on failure.
+func extractJSON(s string) any {
+	candidate := strings.TrimSpace(s)
+
+	// Strip markdown code fence if present.
+	if strings.HasPrefix(candidate, "```") {
+		if idx := strings.Index(candidate, "\n"); idx != -1 {
+			candidate = candidate[idx+1:]
+		}
+		if idx := strings.LastIndex(candidate, "```"); idx != -1 {
+			candidate = strings.TrimSpace(candidate[:idx])
+		}
+	}
+
+	// Try the full trimmed string first.
+	var result any
+	if err := json.Unmarshal([]byte(candidate), &result); err == nil {
+		return result
+	}
+
+	// Extract the first outermost JSON object {...} or array [...] from the text.
+	for _, delims := range [][2]byte{[2]byte{'{', '}'}, [2]byte{'[', ']'}} {
+		open, close := delims[0], delims[1]
+		start := strings.IndexByte(candidate, open)
+		if start < 0 {
+			continue
+		}
+		// Walk backwards from end to find the matching close.
+		end := strings.LastIndexByte(candidate, close)
+		if end <= start {
+			continue
+		}
+		if err := json.Unmarshal([]byte(candidate[start:end+1]), &result); err == nil {
+			return result
+		}
+	}
+
+	return s // fall back to raw string
 }
 
 func llmStringSlice(input map[string]any, key string) []string {

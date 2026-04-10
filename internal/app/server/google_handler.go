@@ -1,18 +1,25 @@
 package server
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
+	"time"
 
 	googleapp "cosmicbizwitch/internal/app/google"
 
 	"golang.org/x/oauth2"
 )
+
+const googleOAuthCallbackURL = "https://server.cosmicbizwitch.com/api/google/auth/callback"
+
+// pendingOAuth holds state for an in-progress OAuth flow.
+type pendingOAuth struct {
+	cfg       *oauth2.Config
+	expiresAt time.Time
+}
 
 // handleGoogleAuthStatus returns whether Google Drive is connected.
 // GET /api/google/auth/status
@@ -21,9 +28,8 @@ func (s *Server) handleGoogleAuthStatus(w http.ResponseWriter, r *http.Request) 
 	s.respondJSON(w, http.StatusOK, map[string]any{"connected": connected})
 }
 
-// getGoogleOAuthCredentials returns OAuth credentials from settings or environment
+// getGoogleOAuthCredentials returns OAuth credentials from settings, environment, or built-in defaults.
 func (s *Server) getGoogleOAuthCredentials() (clientID, clientSecret string) {
-	// Try settings first, then environment, then defaults
 	clientID = s.settings.Get("GOOGLE_CLIENT_ID")
 	if clientID == "" {
 		clientID = os.Getenv("GOOGLE_CLIENT_ID")
@@ -36,85 +42,78 @@ func (s *Server) getGoogleOAuthCredentials() (clientID, clientSecret string) {
 }
 
 // handleGoogleAuthStart initiates the OAuth2 flow for Google Drive/Docs.
-// It starts a temporary listener on :54321 to catch the callback, then
-// redirects the browser to Google's consent page.
 // GET /api/google/auth/start
 func (s *Server) handleGoogleAuthStart(w http.ResponseWriter, r *http.Request) {
 	clientID, clientSecret := s.getGoogleOAuthCredentials()
 
-	cfg := googleapp.OAuthConfig(clientID, clientSecret)
+	cfg := googleapp.OAuthConfig(clientID, clientSecret, googleOAuthCallbackURL)
 	state := randomHex(16)
+
+	s.oauthStateMu.Lock()
+	s.oauthPending[state] = pendingOAuth{cfg: cfg, expiresAt: time.Now().Add(10 * time.Minute)}
+	s.oauthStateMu.Unlock()
+
 	authURL := cfg.AuthCodeURL(state,
 		oauth2.AccessTypeOffline,
 		oauth2.SetAuthURLParam("prompt", "consent"),
 	)
 
-	// Start the callback listener before redirecting, so it is ready
-	// to accept the redirect from Google.
-	ln, err := net.Listen("tcp", "127.0.0.1:54321")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to start OAuth callback listener on :54321 — is something else using that port? (%v)", err), http.StatusInternalServerError)
-		return
-	}
-
-	go s.serveOAuthCallback(ln, cfg, state)
-
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
 
-// serveOAuthCallback handles exactly one request on ln: the redirect from Google
-// containing the authorization code. It exchanges the code for tokens, saves
-// the refresh token, rebuilds the Google client, then closes the listener.
-func (s *Server) serveOAuthCallback(ln net.Listener, cfg *oauth2.Config, expectedState string) {
-	srv := &http.Server{}
-	srv.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Always shut down after this one request.
-		defer func() { go srv.Shutdown(context.Background()) }()
+// handleGoogleAuthCallback receives the redirect from Google after the user grants access.
+// GET /api/google/auth/callback
+func (s *Server) handleGoogleAuthCallback(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
 
-		q := r.URL.Query()
-		if errMsg := q.Get("error"); errMsg != "" {
-			http.Error(w, "Google denied access: "+errMsg, http.StatusForbidden)
-			s.logger.Printf("google auth: denied by user: %s", errMsg)
-			return
-		}
+	if errMsg := q.Get("error"); errMsg != "" {
+		http.Error(w, "Google denied access: "+errMsg, http.StatusForbidden)
+		s.logger.Printf("google auth: denied by user: %s", errMsg)
+		return
+	}
 
-		if q.Get("state") != expectedState {
-			http.Error(w, "invalid state parameter", http.StatusBadRequest)
-			s.logger.Println("google auth: state mismatch in callback")
-			return
-		}
+	state := q.Get("state")
+	s.oauthStateMu.Lock()
+	pending, ok := s.oauthPending[state]
+	if ok {
+		delete(s.oauthPending, state)
+	}
+	s.oauthStateMu.Unlock()
 
-		code := q.Get("code")
-		tok, err := cfg.Exchange(r.Context(), code)
-		if err != nil {
-			http.Error(w, "token exchange failed: "+err.Error(), http.StatusInternalServerError)
-			s.logger.Printf("google auth: token exchange failed: %v", err)
-			return
-		}
+	if !ok || time.Now().After(pending.expiresAt) {
+		http.Error(w, "invalid or expired state parameter", http.StatusBadRequest)
+		s.logger.Println("google auth: invalid or expired state in callback")
+		return
+	}
 
-		if tok.RefreshToken == "" {
-			http.Error(w, "no refresh token returned — revoke app access in Google account settings and try again", http.StatusInternalServerError)
-			s.logger.Println("google auth: no refresh token in response")
-			return
-		}
+	tok, err := pending.cfg.Exchange(r.Context(), q.Get("code"))
+	if err != nil {
+		http.Error(w, "token exchange failed: "+err.Error(), http.StatusInternalServerError)
+		s.logger.Printf("google auth: token exchange failed: %v", err)
+		return
+	}
 
-		if err := s.settings.Set("GOOGLE_REFRESH_TOKEN", tok.RefreshToken); err != nil {
-			http.Error(w, "failed to save refresh token: "+err.Error(), http.StatusInternalServerError)
-			s.logger.Printf("google auth: save refresh token: %v", err)
-			return
-		}
-		if err := s.settings.Reload(s.logger); err != nil {
-			s.logger.Printf("google auth: settings reload: %v", err)
-		}
+	if tok.RefreshToken == "" {
+		http.Error(w, "no refresh token returned — revoke app access in Google account settings and try again", http.StatusInternalServerError)
+		s.logger.Println("google auth: no refresh token in response")
+		return
+	}
 
-		s.logger.Println("google auth: successfully connected Google Drive")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<!doctype html><html><body style="font-family:sans-serif;padding:40px;text-align:center">
+	if err := s.settings.Set("GOOGLE_REFRESH_TOKEN", tok.RefreshToken); err != nil {
+		http.Error(w, "failed to save refresh token: "+err.Error(), http.StatusInternalServerError)
+		s.logger.Printf("google auth: save refresh token: %v", err)
+		return
+	}
+	if err := s.settings.Reload(s.logger); err != nil {
+		s.logger.Printf("google auth: settings reload: %v", err)
+	}
+
+	s.logger.Println("google auth: successfully connected Google Drive")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, `<!doctype html><html><body style="font-family:sans-serif;padding:40px;text-align:center">
 <h2>✅ Google Drive connected!</h2>
 <p>You can close this window and return to the app.</p>
 </body></html>`)
-	})
-	srv.Serve(ln)
 }
 
 // handleGoogleDriveBrowse lists files and folders in a Drive directory.

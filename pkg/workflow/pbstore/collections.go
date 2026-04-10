@@ -34,6 +34,7 @@ func createWorkflowsCollection(app core.App) error {
 		&core.DateField{Name: "finished_at"},
 		&core.TextField{Name: "current_node", Max: 100},
 		&core.JSONField{Name: "context"},
+		&core.JSONField{Name: "initial_context"},
 		&core.AutodateField{Name: "created", OnCreate: true},
 		&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true},
 	)
@@ -87,6 +88,22 @@ func createTriggersCollection(app core.App) error {
 		&core.AutodateField{Name: "created", OnCreate: true},
 		&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true},
 	)
+	return app.Save(col)
+}
+
+// MigrateAddInitialContext adds the initial_context JSON field to the existing
+// wf_workflows collection. It is a no-op if the field already exists, making
+// it safe to call on every startup for existing installations.
+func MigrateAddInitialContext(app core.App) error {
+	col, err := app.FindCollectionByNameOrId("wf_workflows")
+	if err != nil {
+		return err
+	}
+	// Check if field already exists.
+	if col.Fields.GetByName("initial_context") != nil {
+		return nil // already migrated
+	}
+	col.Fields.Add(&core.JSONField{Name: "initial_context"})
 	return app.Save(col)
 }
 

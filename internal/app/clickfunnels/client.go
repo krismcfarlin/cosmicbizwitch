@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -55,6 +56,14 @@ type Tag struct {
 	Name      string `json:"name"`
 	Color     string `json:"color"`
 	AppliedAt string `json:"applied_at"`
+}
+
+// AppliedTag represents a tag that has been applied to a specific contact.
+// The ID here is the applied-tag record ID, not the tag ID.
+type AppliedTag struct {
+	ID    int `json:"id"`
+	TagID int `json:"tag_id"`
+	Tag   Tag `json:"tag"`
 }
 
 // Contact represents a ClickFunnels contact record.
@@ -204,6 +213,200 @@ func (c *Client) GetContact(ctx context.Context, id int) (*Contact, error) {
 	return &contact, nil
 }
 
+// listTagsPage fetches one page of tags with optional after-cursor and name filter.
+func (c *Client) listTagsPage(ctx context.Context, afterID int, nameFilter string) ([]Tag, error) {
+	base := fmt.Sprintf("%s/workspaces/%s/contacts/tags", c.baseURL(), c.WorkspaceID)
+	params := url.Values{}
+	if afterID > 0 {
+		params.Set("after", strconv.Itoa(afterID))
+	}
+	if nameFilter != "" {
+		params.Set("filter[name]", nameFilter)
+	}
+	endpoint := base
+	if len(params) > 0 {
+		endpoint = base + "?" + params.Encode()
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: build list tags request: %w", err)
+	}
+
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: list tags request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("clickfunnels: list tags: status %d body=%s", resp.StatusCode, string(body))
+	}
+
+	var tags []Tag
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, fmt.Errorf("clickfunnels: decode list tags response: %w", err)
+	}
+	return tags, nil
+}
+
+// ListTags fetches all contact tags from the workspace, paginating via after-cursor.
+// nameFilter is passed as filter[name] to the CF API for server-side filtering; pass "" to get all tags.
+func (c *Client) ListTags(ctx context.Context, nameFilter string) ([]Tag, error) {
+	var all []Tag
+	afterID := 0
+	seen := make(map[int]struct{})
+	for {
+		page, err := c.listTagsPage(ctx, afterID, nameFilter)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		// Guard against infinite loops if the API returns overlapping pages.
+		newItems := 0
+		for _, t := range page {
+			if _, dup := seen[t.ID]; !dup {
+				seen[t.ID] = struct{}{}
+				all = append(all, t)
+				newItems++
+			}
+		}
+		if newItems == 0 {
+			break
+		}
+		afterID = page[len(page)-1].ID
+	}
+	return all, nil
+}
+
+// ListAppliedTags returns all applied-tag records for a contact.
+func (c *Client) ListAppliedTags(ctx context.Context, contactID int) ([]AppliedTag, error) {
+	endpoint := fmt.Sprintf("%s/contacts/%d/applied_tags", c.baseURL(), contactID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: build list applied tags request: %w", err)
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: list applied tags request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("clickfunnels: list applied tags: status %d body=%s", resp.StatusCode, string(body))
+	}
+
+	var tags []AppliedTag
+	if err := json.NewDecoder(resp.Body).Decode(&tags); err != nil {
+		return nil, fmt.Errorf("clickfunnels: decode applied tags response: %w", err)
+	}
+	return tags, nil
+}
+
+// AddAppliedTag applies a single tag to a contact and returns the applied-tag record from CF.
+func (c *Client) AddAppliedTag(ctx context.Context, contactID int, tagID int) (*AppliedTag, error) {
+	endpoint := fmt.Sprintf("%s/contacts/%d/applied_tags", c.baseURL(), contactID)
+
+	body, err := json.Marshal(map[string]any{"contacts_applied_tag": map[string]any{"tag_id": tagID}})
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: marshal add applied tag body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: build add applied tag request: %w", err)
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: add applied tag request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("clickfunnels: add applied tag (contact=%d tag=%d): status %d body=%s", contactID, tagID, resp.StatusCode, string(b))
+	}
+
+	var applied AppliedTag
+	if err := json.NewDecoder(resp.Body).Decode(&applied); err != nil {
+		// Non-fatal: CF may return 201 with no body on duplicate; return empty struct.
+		return &AppliedTag{TagID: tagID}, nil
+	}
+	return &applied, nil
+}
+
+// RemoveAppliedTag removes an applied-tag record by its applied-tag ID (not the tag ID).
+func (c *Client) RemoveAppliedTag(ctx context.Context, contactID int, appliedTagID int) error {
+	endpoint := fmt.Sprintf("%s/contacts/%d/applied_tags/%d", c.baseURL(), contactID, appliedTagID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("clickfunnels: build remove applied tag request: %w", err)
+	}
+	resp, err := c.do(req)
+	if err != nil {
+		return fmt.Errorf("clickfunnels: remove applied tag request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 && resp.StatusCode != 404 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("clickfunnels: remove applied tag (contact=%d applied=%d): status %d body=%s", contactID, appliedTagID, resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// SearchContactsByEmail searches for contacts whose email address contains the query string.
+// It passes filter[email_address] to the API (which may do prefix/exact matching server-side)
+// and additionally filters results client-side with a case-insensitive contains check.
+// maxResults caps the returned slice (0 = no cap).
+func (c *Client) SearchContactsByEmail(ctx context.Context, emailQuery string, maxResults int) ([]Contact, error) {
+	endpoint := fmt.Sprintf("%s/workspaces/%s/contacts", c.baseURL(), c.WorkspaceID)
+	params := url.Values{}
+	params.Set("filter[email_address]", emailQuery)
+	params.Set("per_page", "100")
+	endpoint = endpoint + "?" + params.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: build search contacts request: %w", err)
+	}
+
+	resp, err := c.do(req)
+	if err != nil {
+		return nil, fmt.Errorf("clickfunnels: search contacts request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("clickfunnels: search contacts: status %d body=%s", resp.StatusCode, string(body))
+	}
+
+	var contacts []Contact
+	if err := json.NewDecoder(resp.Body).Decode(&contacts); err != nil {
+		return nil, fmt.Errorf("clickfunnels: decode search contacts response: %w", err)
+	}
+
+	// Client-side partial match filter (case-insensitive) in case the API does exact-only matching.
+	lower := strings.ToLower(emailQuery)
+	var matched []Contact
+	for _, c := range contacts {
+		if c.EmailAddress != nil && strings.Contains(strings.ToLower(*c.EmailAddress), lower) {
+			matched = append(matched, c)
+			if maxResults > 0 && len(matched) >= maxResults {
+				break
+			}
+		}
+	}
+	return matched, nil
+}
+
 // CreateContact creates a new contact in the workspace.
 func (c *Client) CreateContact(ctx context.Context, params ContactParams) (*Contact, error) {
 	endpoint := fmt.Sprintf("%s/workspaces/%s/contacts", c.baseURL(), c.WorkspaceID)
@@ -213,6 +416,7 @@ func (c *Client) CreateContact(ctx context.Context, params ContactParams) (*Cont
 		return nil, fmt.Errorf("clickfunnels: marshal create contact body: %w", err)
 	}
 
+	log.Printf("[cf] POST %s body=%s", endpoint, body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("clickfunnels: build create contact request: %w", err)
@@ -244,6 +448,7 @@ func (c *Client) UpdateContact(ctx context.Context, id int, params ContactParams
 		return nil, fmt.Errorf("clickfunnels: marshal update contact body: %w", err)
 	}
 
+	log.Printf("[cf] PUT %s body=%s", endpoint, body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("clickfunnels: build update contact request: %w", err)

@@ -7,6 +7,7 @@ interface Setting {
   label: string
   description: string
   is_secret: boolean
+  is_set: boolean
 }
 
 interface RowState {
@@ -14,6 +15,11 @@ interface RowState {
   saving: boolean
   status: 'idle' | 'saved' | 'error'
   errorMsg: string
+}
+
+interface OpenRouterKey {
+  name: string
+  key: string
 }
 
 export default function Settings() {
@@ -27,6 +33,18 @@ export default function Settings() {
   const [testTemplateDocId, setTestTemplateDocId] = useState('')
   const [testDestFolderId, setTestDestFolderId] = useState('')
   const [copiedText, setCopiedText] = useState('')
+  const [slackConnected, setSlackConnected] = useState<boolean | null>(null)
+  const [slackWorkspace, setSlackWorkspace] = useState('')
+  const [slackConnecting, setSlackConnecting] = useState(false)
+  const [telegramBotTokenSet, setTelegramBotTokenSet] = useState<boolean | null>(null)
+  const [telegramConnected, setTelegramConnected] = useState<boolean | null>(null)
+  const [telegramWebhookRegistering, setTelegramWebhookRegistering] = useState(false)
+  const [telegramWebhookResult, setTelegramWebhookResult] = useState<'idle' | 'success' | 'error'>('idle')
+  const [openRouterKeys, setOpenRouterKeys] = useState<OpenRouterKey[]>([])
+  const [openRouterSaving, setOpenRouterSaving] = useState(false)
+  const [openRouterStatus, setOpenRouterStatus] = useState<'idle' | 'saved' | 'error'>('idle')
+  const [openRouterErrorMsg, setOpenRouterErrorMsg] = useState('')
+  const [openRouterValidationMsg, setOpenRouterValidationMsg] = useState('')
   const navigate = useNavigate()
 
   const load = useCallback(async () => {
@@ -61,6 +79,49 @@ export default function Settings() {
       .then(r => r.json())
       .then(d => setGoogleConnected(d.connected))
       .catch(() => setGoogleConnected(false))
+  }, [])
+
+  // Check Slack connection status on mount.
+  useEffect(() => {
+    fetch('/api/slack/auth/status')
+      .then(r => r.json())
+      .then(d => {
+        setSlackConnected(d.connected)
+        if (d.workspace) setSlackWorkspace(d.workspace)
+      })
+      .catch(() => setSlackConnected(false))
+  }, [])
+
+  // Check Telegram connection status on mount.
+  useEffect(() => {
+    fetch('/api/telegram/status')
+      .then(r => r.json())
+      .then(d => {
+        setTelegramConnected(d.connected)
+        setTelegramBotTokenSet(d.bot_token_set)
+      })
+      .catch(() => {
+        setTelegramConnected(false)
+        setTelegramBotTokenSet(false)
+      })
+  }, [])
+
+  // Load OpenRouter keys from settings on mount.
+  useEffect(() => {
+    fetch('/app/settings')
+      .then(r => r.json())
+      .then((data: Setting[]) => {
+        const entry = data.find(s => s.key === 'OPENROUTER_KEYS')
+        if (entry && entry.value) {
+          try {
+            const parsed = JSON.parse(entry.value)
+            if (Array.isArray(parsed)) {
+              setOpenRouterKeys(parsed)
+            }
+          } catch { /* ignore malformed */ }
+        }
+      })
+      .catch(() => {})
   }, [])
 
   // Fetch refresh token when Google is connected
@@ -103,6 +164,79 @@ export default function Settings() {
     setTimeout(() => { clearInterval(interval); setGoogleConnecting(false) }, 180000)
   }
 
+  const connectSlack = () => {
+    setSlackConnecting(true)
+    window.open('/api/slack/auth/start', '_blank', 'width=520,height=640')
+    // Poll until the OAuth callback saves the token.
+    const interval = setInterval(async () => {
+      try {
+        const r = await fetch('/api/slack/auth/status')
+        const d = await r.json()
+        if (d.connected) {
+          setSlackConnected(true)
+          if (d.workspace) setSlackWorkspace(d.workspace)
+          setSlackConnecting(false)
+          clearInterval(interval)
+        }
+      } catch { /* ignore */ }
+    }, 2000)
+    // Stop polling after 60 seconds.
+    setTimeout(() => { clearInterval(interval); setSlackConnecting(false) }, 60000)
+  }
+
+  const registerTelegramWebhook = async () => {
+    setTelegramWebhookRegistering(true)
+    setTelegramWebhookResult('idle')
+    try {
+      const res = await fetch('/api/telegram/set-webhook', { method: 'POST' })
+      if (res.ok) {
+        setTelegramWebhookResult('success')
+        setTelegramConnected(true)
+        setTelegramBotTokenSet(true)
+      } else {
+        setTelegramWebhookResult('error')
+      }
+    } catch {
+      setTelegramWebhookResult('error')
+    }
+    setTelegramWebhookRegistering(false)
+  }
+
+  const saveOpenRouterKeys = async () => {
+    setOpenRouterValidationMsg('')
+    // Check for partial rows (name without key, or key without name).
+    const partial = openRouterKeys.filter(k => (k.name && !k.key) || (!k.name && k.key))
+    if (partial.length > 0) {
+      setOpenRouterValidationMsg('Each row must have both a name and a key, or leave both empty.')
+      return
+    }
+    // Filter out completely empty rows before saving.
+    const toSave = openRouterKeys.filter(k => k.name || k.key)
+    setOpenRouterSaving(true)
+    setOpenRouterStatus('idle')
+    setOpenRouterErrorMsg('')
+    try {
+      const res = await fetch('/app/settings/OPENROUTER_KEYS', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: JSON.stringify(toSave) }),
+      })
+      if (res.ok) {
+        setOpenRouterKeys(toSave)
+        setOpenRouterStatus('saved')
+        setTimeout(() => setOpenRouterStatus('idle'), 3000)
+      } else {
+        const text = await res.text()
+        setOpenRouterStatus('error')
+        setOpenRouterErrorMsg(text || `Error ${res.status}`)
+      }
+    } catch (err) {
+      setOpenRouterStatus('error')
+      setOpenRouterErrorMsg(String(err))
+    }
+    setOpenRouterSaving(false)
+  }
+
   const patchRow = (key: string, patch: Partial<RowState>) => {
     setRowStates(prev => ({ ...prev, [key]: { ...prev[key], ...patch } }))
   }
@@ -119,6 +253,8 @@ export default function Settings() {
       })
       if (res.ok) {
         patchRow(key, { saving: false, status: 'saved' })
+        // Update is_set badge immediately based on whether new value is non-empty
+        setSettings(prev => prev.map(s => s.key === key ? { ...s, is_set: state.value !== '' } : s))
         setTimeout(() => patchRow(key, { status: 'idle' }), 3000)
       } else {
         const text = await res.text()
@@ -194,6 +330,12 @@ export default function Settings() {
                         <span style={{ fontSize: '12px', color: '#e74c3c', fontWeight: 500 }}>{state.errorMsg || 'Error saving'}</span>
                       )}
                     </div>
+                    <div style={{ flex: '0 0 64px', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', paddingTop: '6px' }}>
+                      {s.is_set
+                        ? <span style={{ fontSize: '18px', color: '#27ae60', lineHeight: 1 }} title="Set">✓</span>
+                        : <span style={{ fontSize: '11px', color: '#bbb', fontStyle: 'italic', whiteSpace: 'nowrap' }}>not set</span>
+                      }
+                    </div>
                   </div>
                 )
               })}
@@ -226,6 +368,186 @@ export default function Settings() {
                 {googleConnecting ? 'Waiting for auth...' : googleConnected ? 'Reconnect' : 'Connect Google Drive'}
               </button>
             </div>
+          </div>
+        </div>
+
+        {/* Slack connection */}
+        {(() => {
+          const clientIdSetting = settings.find(s => s.key === 'SLACK_CLIENT_ID')
+          const clientSecretSetting = settings.find(s => s.key === 'SLACK_CLIENT_SECRET')
+          const credsMissing = !clientIdSetting?.is_set || !clientSecretSetting?.is_set
+          return (
+            <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', padding: '20px 24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: '14px', color: '#2c3e50', marginBottom: '4px' }}>Slack</div>
+                  <div style={{ fontSize: '12px', color: '#888', lineHeight: '1.5' }}>
+                    OAuth2 authorization for Slack workflow nodes.
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexShrink: 0, marginLeft: '24px' }}>
+                  {slackConnected === null ? (
+                    <span style={{ fontSize: '12px', color: '#aaa' }}>Checking...</span>
+                  ) : slackConnected ? (
+                    <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 600 }}>● Connected{slackWorkspace ? `: ${slackWorkspace}` : ''}</span>
+                  ) : (
+                    <span style={{ fontSize: '12px', color: '#e74c3c', fontWeight: 500 }}>○ Not connected</span>
+                  )}
+                  <div style={{ position: 'relative', display: 'inline-block' }}>
+                    <button
+                      onClick={credsMissing ? undefined : connectSlack}
+                      disabled={slackConnecting || credsMissing}
+                      title={credsMissing ? 'Add Client ID and Secret first' : undefined}
+                      style={saveBtn(slackConnecting || credsMissing)}
+                    >
+                      {slackConnecting ? 'Waiting for auth...' : slackConnected ? 'Reconnect' : 'Connect Slack'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        })()}
+
+        {/* Telegram connection */}
+        {(() => {
+          const tokenSetting = settings.find(s => s.key === 'TELEGRAM_BOT_TOKEN')
+          const tokenMissing = !tokenSetting?.is_set && !telegramBotTokenSet
+          return (
+            <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', padding: '20px 24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: '14px', color: '#2c3e50', marginBottom: '4px' }}>Telegram</div>
+                  <div style={{ fontSize: '12px', color: '#888', lineHeight: '1.5' }}>
+                    Token-based bot authorization for Telegram workflow nodes.
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexShrink: 0, marginLeft: '24px' }}>
+                  {telegramConnected === null ? (
+                    <span style={{ fontSize: '12px', color: '#aaa' }}>Checking...</span>
+                  ) : telegramBotTokenSet ? (
+                    <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 600 }}>● Bot connected</span>
+                  ) : (
+                    <span style={{ fontSize: '12px', color: '#999', fontWeight: 500 }}>○ Not connected</span>
+                  )}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+                    <button
+                      onClick={tokenMissing || telegramWebhookRegistering ? undefined : registerTelegramWebhook}
+                      disabled={telegramWebhookRegistering || tokenMissing}
+                      title={tokenMissing ? 'Add TELEGRAM_BOT_TOKEN first' : undefined}
+                      style={saveBtn(telegramWebhookRegistering || tokenMissing || false)}
+                    >
+                      {telegramWebhookRegistering ? 'Registering...' : 'Register Webhook'}
+                    </button>
+                    {telegramWebhookResult === 'success' && (
+                      <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 500 }}>Webhook registered ✓</span>
+                    )}
+                    {telegramWebhookResult === 'error' && (
+                      <span style={{ fontSize: '12px', color: '#e74c3c', fontWeight: 500 }}>Registration failed</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        })()}
+
+        {/* OpenRouter API Keys */}
+        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', padding: '20px 24px' }}>
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ fontWeight: 600, fontSize: '14px', color: '#2c3e50', marginBottom: '4px' }}>OpenRouter API Keys</div>
+            <div style={{ fontSize: '12px', color: '#888', lineHeight: '1.5' }}>
+              Named keys used by AI workflow nodes. Each key can be selected by name in llm_prompt and image_generate nodes.
+            </div>
+          </div>
+
+          {/* Key rows */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
+            {openRouterKeys.map((row, idx) => (
+              <div key={idx} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <input
+                  type="text"
+                  value={row.name}
+                  placeholder="name (e.g. text)"
+                  onChange={e => {
+                    const updated = openRouterKeys.map((k, i) => i === idx ? { ...k, name: e.target.value } : k)
+                    setOpenRouterKeys(updated)
+                    setOpenRouterValidationMsg('')
+                  }}
+                  style={{ ...inputStyle, flex: '0 0 140px' }}
+                />
+                <input
+                  type="password"
+                  value={row.key}
+                  placeholder="sk-or-..."
+                  onChange={e => {
+                    const updated = openRouterKeys.map((k, i) => i === idx ? { ...k, key: e.target.value } : k)
+                    setOpenRouterKeys(updated)
+                    setOpenRouterValidationMsg('')
+                  }}
+                  style={{ ...inputStyle, flex: 1 }}
+                />
+                <button
+                  onClick={() => {
+                    setOpenRouterKeys(openRouterKeys.filter((_, i) => i !== idx))
+                    setOpenRouterValidationMsg('')
+                  }}
+                  title="Remove this key"
+                  style={{
+                    background: 'none',
+                    border: '1px solid #e0e6ed',
+                    borderRadius: '4px',
+                    color: '#999',
+                    cursor: 'pointer',
+                    fontSize: '14px',
+                    lineHeight: 1,
+                    padding: '7px 10px',
+                    flexShrink: 0,
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+
+          {/* Validation warning */}
+          {openRouterValidationMsg && (
+            <div style={{ fontSize: '12px', color: '#e67e22', fontWeight: 500, marginBottom: '10px' }}>
+              {openRouterValidationMsg}
+            </div>
+          )}
+
+          {/* Action row */}
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button
+              onClick={() => setOpenRouterKeys([...openRouterKeys, { name: '', key: '' }])}
+              style={{
+                background: 'none',
+                border: '1px solid #6b46c1',
+                borderRadius: '4px',
+                color: '#6b46c1',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: 500,
+                padding: '8px 14px',
+              }}
+            >
+              + Add Key
+            </button>
+            <button
+              onClick={saveOpenRouterKeys}
+              disabled={openRouterSaving}
+              style={saveBtn(openRouterSaving)}
+            >
+              {openRouterSaving ? 'Saving...' : 'Save All'}
+            </button>
+            {openRouterStatus === 'saved' && (
+              <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 500 }}>Saved</span>
+            )}
+            {openRouterStatus === 'error' && (
+              <span style={{ fontSize: '12px', color: '#e74c3c', fontWeight: 500 }}>{openRouterErrorMsg || 'Error saving'}</span>
+            )}
           </div>
         </div>
 

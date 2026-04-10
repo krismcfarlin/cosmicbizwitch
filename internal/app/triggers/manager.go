@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"cosmicbizwitch/pkg/workflow"
@@ -78,6 +79,118 @@ func (m *Manager) Start(ctx context.Context) {
 	}()
 
 	m.logger.Println("[triggers] manager started")
+}
+
+// FireByType finds all enabled triggers of the given type and fires each one with payload.
+// Triggers that define filter conditions in their Config are only fired when all filters match.
+// Returns the number of workflows started.
+func (m *Manager) FireByType(ctx context.Context, triggerType string, payload map[string]any) (int, error) {
+	triggers, err := m.loadEnabled(triggerType)
+	if err != nil {
+		return 0, fmt.Errorf("FireByType %s: load triggers: %w", triggerType, err)
+	}
+	fired := 0
+	for _, t := range triggers {
+		if !matchesTelegramFilters(t.Config, payload) {
+			continue
+		}
+		if _, err := m.fire(ctx, t, payload); err != nil {
+			m.logger.Printf("[triggers] %s trigger %s failed: %v", triggerType, t.Name, err)
+		} else {
+			_ = m.updateLastFired(t.ID)
+			fired++
+		}
+	}
+	return fired, nil
+}
+
+// matchesTelegramFilters checks whether the given payload satisfies all filter
+// conditions stored in a trigger's Config map. All conditions are AND — every
+// non-empty filter must match for the function to return true. Triggers that
+// set none of the recognised filter keys always pass.
+func matchesTelegramFilters(config map[string]any, payload map[string]any) bool {
+	// text_contains: case-insensitive substring match against payload["text"]
+	if v, ok := config["text_contains"].(string); ok && v != "" {
+		text, _ := payload["text"].(string)
+		if !strings.Contains(strings.ToLower(text), strings.ToLower(v)) {
+			return false
+		}
+	}
+	// text_starts_with: case-insensitive prefix match
+	if v, ok := config["text_starts_with"].(string); ok && v != "" {
+		text, _ := payload["text"].(string)
+		if !strings.HasPrefix(strings.ToLower(text), strings.ToLower(v)) {
+			return false
+		}
+	}
+	// chat_id: exact match (config value may be float64 from JSON)
+	if v, ok := config["chat_id"]; ok {
+		configChatID := int64(toFloat64(v))
+		payloadChatID, _ := payload["chat_id"].(int64)
+		if configChatID != 0 && configChatID != payloadChatID {
+			return false
+		}
+	}
+	// chat_type: exact string match ("private", "group", "supergroup", "channel")
+	if v, ok := config["chat_type"].(string); ok && v != "" {
+		chatType, _ := payload["chat_type"].(string)
+		if chatType != v {
+			return false
+		}
+	}
+	// username: case-insensitive exact match
+	if v, ok := config["username"].(string); ok && v != "" {
+		username, _ := payload["username"].(string)
+		if !strings.EqualFold(username, v) {
+			return false
+		}
+	}
+	// callback_data: exact match (for telegram_callback triggers)
+	if v, ok := config["callback_data"].(string); ok && v != "" {
+		data, _ := payload["callback_data"].(string)
+		if data != v {
+			return false
+		}
+	}
+	// callback_data_prefix: starts-with match
+	if v, ok := config["callback_data_prefix"].(string); ok && v != "" {
+		data, _ := payload["callback_data"].(string)
+		if !strings.HasPrefix(data, v) {
+			return false
+		}
+	}
+	return true
+}
+
+// toFloat64 coerces common numeric types to float64 for filter comparisons.
+func toFloat64(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case int64:
+		return float64(n)
+	case int:
+		return float64(n)
+	}
+	return 0
+}
+
+// FireByID finds an enabled trigger by its PocketBase record ID and starts a workflow.
+func (m *Manager) FireByID(ctx context.Context, id string, payload map[string]any) (*workflow.Workflow, error) {
+	rec, err := m.app.FindRecordById(colTriggers, id)
+	if err != nil {
+		return nil, fmt.Errorf("trigger not found")
+	}
+	t := recordToTrigger(rec)
+	if !t.Enabled {
+		return nil, fmt.Errorf("trigger is disabled")
+	}
+	wf, err := m.fire(ctx, t, payload)
+	if err != nil {
+		return nil, err
+	}
+	_ = m.updateLastFired(t.ID)
+	return wf, nil
 }
 
 // FireWebhook finds a trigger by token and starts a workflow with the given payload.

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"cosmicbizwitch/internal/app/clickfunnels"
@@ -16,16 +18,43 @@ import (
 	"cosmicbizwitch/pkg/workflow"
 )
 
+// cfTagsCache holds a snapshot of all workspace tags with a TTL.
+type cfTagsCache struct {
+	mu        sync.RWMutex
+	tags      []clickfunnels.Tag
+	fetchedAt time.Time
+	ttl       time.Duration
+}
+
+func (c *cfTagsCache) get() ([]clickfunnels.Tag, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.tags == nil || time.Since(c.fetchedAt) > c.ttl {
+		return nil, false
+	}
+	return c.tags, true
+}
+
+func (c *cfTagsCache) set(tags []clickfunnels.Tag) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tags = tags
+	c.fetchedAt = time.Now()
+}
+
 // Server represents the HTTP server
 type Server struct {
-	store      *storage.Store
-	mcpServer  *mcp.MCPServer
-	engine     *workflow.Engine
-	triggers   *triggers.Manager
-	settings   *storage.SettingsManager
-	logger     *log.Logger
-	logBuffer  *LogBuffer
-	httpServer *http.Server
+	store           *storage.Store
+	mcpServer       *mcp.MCPServer
+	engine          *workflow.Engine
+	triggers        *triggers.Manager
+	settings        *storage.SettingsManager
+	logger          *log.Logger
+	logBuffer       *LogBuffer
+	httpServer      *http.Server
+	oauthStateMu    sync.Mutex
+	oauthPending    map[string]pendingOAuth
+	cfTags          cfTagsCache
 }
 
 // Config holds server configuration
@@ -46,13 +75,28 @@ func New(store *storage.Store, cfg Config) *Server {
 	}
 
 	s := &Server{
-		store:     store,
-		mcpServer: mcp.NewMCPServer(store, cfg.Logger, cfg.CFClient),
-		engine:    cfg.Engine,
-		triggers:  cfg.Triggers,
-		settings:  cfg.Settings,
-		logger:    cfg.Logger,
-		logBuffer: cfg.LogBuffer,
+		store:        store,
+		mcpServer:    mcp.NewMCPServer(store, cfg.Logger, cfg.CFClient),
+		engine:       cfg.Engine,
+		triggers:     cfg.Triggers,
+		settings:     cfg.Settings,
+		logger:       cfg.Logger,
+		logBuffer:    cfg.LogBuffer,
+		oauthPending: make(map[string]pendingOAuth),
+		cfTags:       cfTagsCache{ttl: 5 * time.Minute},
+	}
+
+	// Create debug tables that are not managed by PocketBase collections.
+	if store != nil {
+		if _, err := store.App().DB().NewQuery(`
+			CREATE TABLE IF NOT EXISTS telegram_messages (
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				received_at TEXT NOT NULL,
+				raw_json    TEXT NOT NULL
+			)
+		`).Execute(); err != nil {
+			cfg.Logger.Printf("server: create telegram_messages table: %v", err)
+		}
 	}
 
 	// Create HTTP server
@@ -108,6 +152,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/workflows/execute-node", s.requireAuth(s.handleExecuteNode))
 	mux.HandleFunc("GET /api/pb/collections/{name}/fields", s.requireAuth(s.handlePbCollectionFields))
 	mux.HandleFunc("GET /api/llm/models", s.requireAuth(s.handleLLMModels))
+	mux.HandleFunc("GET /api/openrouter/keys", s.requireAuth(s.handleOpenRouterKeys))
 	mux.HandleFunc("GET /api/workflows/{id}", s.requireAuth(s.handleWorkflowGet))
 	mux.HandleFunc("GET /api/workflows/{id}/activities", s.requireAuth(s.handleWorkflowActivities))
 	mux.HandleFunc("GET /api/workflows", s.requireAuth(s.handleWorkflowList))
@@ -117,8 +162,9 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/workflows/{id}/restart", s.requireAuth(s.handleWorkflowRestart))
 	mux.HandleFunc("POST /api/workflows/{id}/trigger", s.requireAuth(s.handleWorkflowTrigger))
 
-	// Webhook (no auth — public endpoint)
+	// Webhook / trigger fire (no auth — public endpoints)
 	mux.HandleFunc("POST /webhooks/{token}", s.handleWebhook)
+	mux.HandleFunc("POST /trigger/{id}", s.handleTriggerFire)
 
 	// Trigger CRUD (auth required)
 	mux.HandleFunc("GET /api/triggers", s.requireAuth(s.handleTriggerList))
@@ -133,9 +179,25 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 
 	// Google OAuth & Drive browser (auth required)
 	mux.HandleFunc("GET /api/google/auth/start", s.requireAuth(s.handleGoogleAuthStart))
+	mux.HandleFunc("GET /api/google/auth/callback", s.handleGoogleAuthCallback)
 	mux.HandleFunc("GET /api/google/auth/status", s.requireAuth(s.handleGoogleAuthStatus))
 	mux.HandleFunc("GET /api/google/drive/browse", s.requireAuth(s.handleGoogleDriveBrowse))
 	mux.HandleFunc("GET /api/workflows/gdrive-content", s.requireAuth(s.handleGdriveGetContent))
+
+	// Slack OAuth (auth required except callback which Slack redirects to)
+	mux.HandleFunc("GET /api/slack/auth/start", s.requireAuth(s.handleSlackAuthStart))
+	mux.HandleFunc("GET /api/slack/auth/callback", s.handleSlackAuthCallback)
+	mux.HandleFunc("GET /api/slack/auth/status", s.requireAuth(s.handleSlackAuthStatus))
+
+	// Telegram bot (webhook is public — no auth; management endpoints require auth)
+	mux.HandleFunc("POST /webhooks/telegram", s.handleTelegramWebhook)
+	mux.HandleFunc("GET /api/telegram/status", s.requireAuth(s.handleTelegramStatus))
+	mux.HandleFunc("POST /api/telegram/set-webhook", s.requireAuth(s.handleTelegramSetWebhook))
+	mux.HandleFunc("GET /api/telegram/messages", s.requireAuth(s.handleTelegramMessages))
+	mux.HandleFunc("DELETE /api/telegram/messages", s.requireAuth(s.handleTelegramMessagesClear))
+
+	// ClickFunnels API helpers (auth required)
+	mux.HandleFunc("GET /api/cf/tags", s.requireAuth(s.handleCFTags))
 
 	// Settings API (auth required)
 	mux.HandleFunc("GET /app/settings", s.requireAuth(s.handleSettingsList))
@@ -255,6 +317,44 @@ func (s *Server) handleSettingsUpdate(w http.ResponseWriter, r *http.Request) {
 	s.respondJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleCFTags returns all ClickFunnels workspace tags for the tag picker UI.
+// Tags are cached in-memory for 5 minutes; the optional ?name= query param does
+// case-insensitive substring filtering server-side (CF API filter[name] is exact-only).
+func (s *Server) handleCFTags(w http.ResponseWriter, r *http.Request) {
+	cf := s.settings.CFClient()
+	if cf == nil {
+		s.respondJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "ClickFunnels not configured"})
+		return
+	}
+
+	all, cached := s.cfTags.get()
+	if !cached {
+		var err error
+		all, err = cf.ListTags(r.Context(), "")
+		if err != nil {
+			s.respondError(w, http.StatusBadGateway, "failed to fetch CF tags", err)
+			return
+		}
+		s.cfTags.set(all)
+		s.logger.Printf("cf tags: fetched %d tags from API (cache miss)", len(all))
+	}
+
+	tags := all
+	nameFilter := r.URL.Query().Get("name")
+	if nameFilter != "" {
+		lower := strings.ToLower(nameFilter)
+		filtered := make([]clickfunnels.Tag, 0, len(all))
+		for _, t := range all {
+			if strings.Contains(strings.ToLower(t.Name), lower) {
+				filtered = append(filtered, t)
+			}
+		}
+		tags = filtered
+	}
+
+	s.respondJSON(w, http.StatusOK, map[string]any{"tags": tags})
+}
+
 // Helper functions
 
 func (s *Server) respondJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -303,6 +403,13 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.status = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Flush implements http.Flusher so SSE streams work through the logging middleware.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // Start starts the HTTP server

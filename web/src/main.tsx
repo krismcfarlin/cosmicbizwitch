@@ -7,6 +7,7 @@ import WorkflowDetail from './WorkflowDetail'
 import WorkflowBuilder from './WorkflowBuilder'
 import Triggers from './Triggers'
 import Settings from './Settings'
+import TelegramMessages from './TelegramMessages'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -19,6 +20,7 @@ createRoot(document.getElementById('root')!).render(
         <Route path="/triggers" element={<Triggers />} />
         <Route path="/triggers/*" element={<Triggers />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/telegram/messages" element={<TelegramMessages />} />
         <Route path="*" element={<Navigate to="/workflows" replace />} />
       </Routes>
     </BrowserRouter>

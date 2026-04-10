@@ -164,14 +164,15 @@ func (e *Engine) CreateWorkflow(ctx context.Context, name, graphName string, ini
 	}
 
 	wf := &Workflow{
-		ID:        uuid.New().String(),
-		Name:      name,
-		GraphName: graphName,
-		Status:    status,
-		NotBefore: notBefore,
-		Context:   initialContext,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		ID:             uuid.New().String(),
+		Name:           name,
+		GraphName:      graphName,
+		Status:         status,
+		NotBefore:      notBefore,
+		Context:        initialContext,
+		InitialContext: initialContext,
+		CreatedAt:      time.Now().UTC(),
+		UpdatedAt:      time.Now().UTC(),
 	}
 
 	if err := e.store.CreateWorkflow(ctx, wf); err != nil {
@@ -269,7 +270,11 @@ func (e *Engine) RestartWorkflow(ctx context.Context, id string, overrideContext
 
 	if overrideContext != nil {
 		wf.Context = overrideContext
+		wf.InitialContext = overrideContext // also update initial context on explicit override
+	} else if len(wf.InitialContext) > 0 {
+		wf.Context = wf.InitialContext // reset to original trigger payload
 	}
+	// if InitialContext is empty (old workflow), keep existing context as-is
 	wf.Status = StatusPending
 	wf.CurrentNode = ""
 	wf.StartedAt = nil

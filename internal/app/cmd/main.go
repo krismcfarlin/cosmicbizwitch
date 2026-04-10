@@ -29,6 +29,10 @@ func main() {
 
 	logBuf := server.NewLogBuffer()
 	logger := log.New(logBuf.TeeWriter(os.Stdout), "[APP] ", log.LstdFlags)
+	// Redirect the default Go logger so log.Printf calls anywhere in the app
+	// (activities, workflows, etc.) also appear in the in-app log viewer.
+	log.SetOutput(logBuf.TeeWriter(os.Stdout))
+	log.SetFlags(log.LstdFlags)
 
 	dbPath := getEnv("DB_PATH", "data/coaching.db")
 	port := getEnvInt("PORT", 8085)
@@ -78,6 +82,9 @@ func main() {
 			if err := pbstore.CreateCollections(e.App); err != nil {
 				return fmt.Errorf("workflow collections: %w", err)
 			}
+			if err := pbstore.MigrateAddInitialContext(e.App); err != nil {
+				return fmt.Errorf("migrate initial_context: %w", err)
+			}
 
 			// Settings manager — reads CF credentials from app_settings collection.
 			settingsMgr := storage.NewSettingsManager(e.App)
@@ -89,7 +96,7 @@ func main() {
 			eng := workflow.NewEngine(pbstore.New(e.App), workflow.EngineConfig{Logger: logger})
 
 			// Register default demo activities and graphs
-			if err := appworkflows.RegisterDefaults(eng, e.App, settingsMgr.CFClient, settingsMgr.GoogleClient); err != nil {
+			if err := appworkflows.RegisterDefaults(eng, e.App, settingsMgr.CFClient, settingsMgr.GoogleClient, settingsMgr.SlackClient, settingsMgr.TelegramClient); err != nil {
 				return fmt.Errorf("register default workflows: %w", err)
 			}
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -166,7 +167,14 @@ func (e *Engine) runWorkflow(ctx context.Context, wf *Workflow) {
 		}
 
 		// Evaluate transitions to find the next node.
-		nextNodeID, found := graph.NextNode(nodeID, inst.Output)
+		// When inst.Output is nil (e.g. the node was skipped), evaluate
+		// conditions against the full workflow context so that conditions
+		// like "{{message.voice.file_id}} exists" can still resolve correctly.
+		transitionCtx := inst.Output
+		if transitionCtx == nil {
+			transitionCtx = wf.Context
+		}
+		nextNodeID, found := graph.NextNode(nodeID, transitionCtx)
 		if !found {
 			node := graph.Nodes[nodeID]
 			if node != nil && len(node.Transitions) == 0 {
@@ -654,16 +662,60 @@ func buildInput(ctx map[string]any, mapping []string, staticInput map[string]any
 func deepInterpolate(v any, ctx map[string]any) any {
 	switch val := v.(type) {
 	case string:
-		interpolated := interpolateCtx(val, ctx)
-		trimmed := strings.TrimSpace(interpolated)
-		if (strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}")) ||
-			(strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]")) {
-			var parsed any
-			if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
-				return parsed
+		// Whole-string type hint: entire value is "{{key|number}}" or "{{key|bool}}".
+		// Resolve and return native Go type so map values are actually typed.
+		if m := singleTypeHintRe.FindStringSubmatch(val); m != nil {
+			key := strings.TrimSpace(m[1])
+			hint := strings.TrimSpace(m[2])
+			raw := resolveCtxKey(key, ctx)
+			if raw == "" {
+				if fv, ok := ctx[key]; ok {
+					raw = fmtVal(fv)
+				}
+			}
+			switch hint {
+			case "number":
+				if f, err := strconv.ParseFloat(raw, 64); err == nil {
+					return f
+				}
+				return val // unresolved — leave placeholder as string
+			case "bool":
+				switch strings.ToLower(raw) {
+				case "true", "1", "yes":
+					return true
+				default:
+					return false
+				}
+			case "string":
+				if raw != "" {
+					return raw
+				}
+				return val
 			}
 		}
-		return interpolated
+		// Whole-string bare placeholder: entire value is "{{key}}" with no type hint.
+		// Return the native Go value so maps/slices are preserved instead of stringified.
+		if m := singlePlaceholderRe.FindStringSubmatch(val); m != nil {
+			key := strings.TrimSpace(m[1])
+			if native := resolveCtxNative(key, ctx); native != nil {
+				return native
+			}
+			// Key not found — fall through to normal string interpolation (leaves placeholder).
+		}
+
+		// If the template string itself is a JSON object/array (before substitution),
+		// parse it first and interpolate each field independently. This prevents
+		// template values containing quotes or newlines from breaking the JSON.
+		preTrimmed := strings.TrimSpace(val)
+		if (strings.HasPrefix(preTrimmed, "{") && strings.HasSuffix(preTrimmed, "}")) ||
+			(strings.HasPrefix(preTrimmed, "[") && strings.HasSuffix(preTrimmed, "]")) {
+			var templateParsed any
+			if err := json.Unmarshal([]byte(preTrimmed), &templateParsed); err == nil {
+				return deepInterpolate(templateParsed, ctx)
+			}
+		}
+
+		return interpolateCtx(val, ctx)
 	case map[string]any:
 		out := make(map[string]any, len(val))
 		for k, item := range val {
@@ -681,6 +733,14 @@ func deepInterpolate(v any, ctx map[string]any) any {
 	}
 }
 
+func ctxTopKeys(ctx map[string]any) []string {
+	keys := make([]string, 0, len(ctx))
+	for k := range ctx {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func outputKeys(m map[string]any) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -689,30 +749,204 @@ func outputKeys(m map[string]any) []string {
 	return keys
 }
 
-// interpolateCtx replaces {{key}} and {{a.b.c}} placeholders with values from ctx.
+// interpolateCtx replaces {{key}}, {{a.b.c}}, {{a || b || c}}, and {{key|type}} placeholders.
+// Type hints: {{key|number}} forces numeric JSON, {{key|bool}} forces boolean, {{key|string}} keeps as string.
+// When used inside JSON quotes ("{{key|number}}"), the surrounding quotes are removed so the value
+// becomes a native JSON number or boolean rather than a string.
 func interpolateCtx(s string, ctx map[string]any) string {
-	// Flat keys first.
+	// Type-hinted placeholders: "{{key|number}}" / "{{key|bool}}" / "{{key|string}}"
+	// Must run first so we can strip the surrounding JSON quotes.
+	s = typeHintRe.ReplaceAllStringFunc(s, func(match string) string {
+		// match is like: "{{geocode.0.lat|number}}"
+		// strip leading `"{{` and trailing `}}"`, split on first `|`
+		inner := match[3 : len(match)-3] // strip `"{{` and `}}"`
+		pipe := strings.Index(inner, "|")
+		if pipe < 0 {
+			return match
+		}
+		key := strings.TrimSpace(inner[:pipe])
+		hintFull := strings.TrimSpace(inner[pipe+1:])
+		// Take only first hint segment — handles accumulated |number|number|number
+		hint := hintFull
+		if idx := strings.Index(hintFull, "|"); idx >= 0 {
+			hint = hintFull[:idx]
+		}
+		raw := resolveCtxKey(key, ctx)
+		if raw == "" {
+			// key not found — try flat lookup
+			if v, ok := ctx[key]; ok {
+				raw = fmtVal(v)
+			}
+		}
+		if raw == "" {
+			return match // key not found — leave original "{{key|hint}}" so JSON stays valid
+		}
+		switch hint {
+		case "number":
+			if f, err := strconv.ParseFloat(raw, 64); err == nil {
+				// Use integer representation if it's a whole number.
+				if f == float64(int64(f)) {
+					return fmt.Sprintf("%d", int64(f))
+				}
+				return strconv.FormatFloat(f, 'f', -1, 64)
+			}
+			return match // not a number — leave original so JSON stays valid
+		case "bool":
+			switch strings.ToLower(raw) {
+			case "true", "1", "yes":
+				return "true"
+			default:
+				return "false"
+			}
+		case "string":
+			// Strip the hint marker but re-wrap in quotes (normal string).
+			return `"` + raw + `"`
+		}
+		return match
+	})
+	// Handle || fallback placeholders: {{key1 || key2 || key3}}
+	s = fallbackPlaceholderRe.ReplaceAllStringFunc(s, func(match string) string {
+		inner := match[2 : len(match)-2] // strip {{ }}
+		parts := strings.Split(inner, "||")
+		for _, part := range parts {
+			key := strings.TrimSpace(part)
+			if val := resolveCtxKey(key, ctx); val != "" {
+				return val
+			}
+		}
+		return "" // all empty — resolve to empty string
+	})
+	// Handle split fallback: {{key1}} || {{key2}} — try key1, fall back to key2.
+	s = splitFallbackRe.ReplaceAllStringFunc(s, func(match string) string {
+		subs := splitFallbackRe.FindStringSubmatch(match)
+		if len(subs) < 3 {
+			return match
+		}
+		for _, raw := range []string{subs[1], subs[2]} {
+			key := strings.TrimSpace(raw)
+			if val := resolveCtxKey(key, ctx); val != "" {
+				return val
+			}
+			if v, ok := ctx[key]; ok && v != nil {
+				if sv := fmtVal(v); sv != "" {
+					return sv
+				}
+			}
+		}
+		return ""
+	})
+	// Flat keys.
 	for k, v := range ctx {
-		s = strings.ReplaceAll(s, "{{"+k+"}}", fmt.Sprintf("%v", v))
+		s = strings.ReplaceAll(s, "{{"+k+"}}", fmtVal(v))
 	}
 	// Dot-notation: resolve any remaining {{a.b.c}} placeholders.
 	s = dotPlaceholderRe.ReplaceAllStringFunc(s, func(match string) string {
 		key := match[2 : len(match)-2] // strip {{ }}
-		parts := strings.Split(key, ".")
-		var cur any = map[string]any(ctx)
-		for _, p := range parts {
-			m, ok := cur.(map[string]any)
-			if !ok {
-				return match // unresolved — leave as-is
-			}
-			cur, ok = m[p]
-			if !ok {
-				return match
-			}
-		}
-		return fmt.Sprintf("%v", cur)
+		return resolveCtxKey(key, ctx)
 	})
 	return s
 }
 
-var dotPlaceholderRe = regexp.MustCompile(`\{\{[a-zA-Z_][a-zA-Z0-9_]*(?:\.[a-zA-Z_][a-zA-Z0-9_]*)+\}\}`)
+// resolveCtxKey resolves a single key (supports dot notation and array indices) from ctx.
+// Returns empty string if not found.
+// Examples: "geocode.0.lat", "results.items.0.name"
+// fmtVal converts any value to its string representation for template substitution.
+// float64 values that are whole integers are formatted without scientific notation
+// (e.g. 433619309 not 4.33619309e+08), which is critical for IDs and timestamps.
+func fmtVal(v any) string {
+	if f, ok := v.(float64); ok {
+		if !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f) {
+			return strconv.FormatInt(int64(f), 10)
+		}
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+func resolveCtxKey(key string, ctx map[string]any) string {
+	// Flat key first.
+	if v, ok := ctx[key]; ok {
+		return fmtVal(v)
+	}
+	// Dot-notation with array index support.
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	var cur any = map[string]any(ctx)
+	for _, p := range parts {
+		switch v := cur.(type) {
+		case map[string]any:
+			val, ok := v[p]
+			if !ok {
+				return ""
+			}
+			cur = val
+		case []any:
+			i, err := strconv.Atoi(p)
+			if err != nil || i < 0 || i >= len(v) {
+				return ""
+			}
+			cur = v[i]
+		default:
+			return ""
+		}
+	}
+	return fmtVal(cur)
+}
+
+// resolveCtxNative resolves a dot-path key from ctx and returns the native Go value.
+// Unlike resolveCtxKey it does NOT stringify — maps, slices, numbers are returned as-is.
+// Returns nil if the key is not found.
+func resolveCtxNative(key string, ctx map[string]any) any {
+	if v, ok := ctx[key]; ok {
+		return v
+	}
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	var cur any = map[string]any(ctx)
+	for _, p := range parts {
+		switch v := cur.(type) {
+		case map[string]any:
+			val, ok := v[p]
+			if !ok {
+				return nil
+			}
+			cur = val
+		case []any:
+			i, err := strconv.Atoi(p)
+			if err != nil || i < 0 || i >= len(v) {
+				return nil
+			}
+			cur = v[i]
+		default:
+			return nil
+		}
+	}
+	return cur
+}
+
+// dotPlaceholderRe matches {{a.b.c}} and {{a.0.b}} — dot-paths including numeric array indices.
+var dotPlaceholderRe = regexp.MustCompile(`\{\{[a-zA-Z_]\w*(?:\.\w+)+\}\}`)
+
+// fallbackPlaceholderRe matches {{key1 || key2}} style placeholders (2+ alternatives).
+var fallbackPlaceholderRe = regexp.MustCompile(`\{\{[^{}]+\|\|[^{}]+\}\}`)
+
+// splitFallbackRe matches the "split" form: {{key1}} || {{key2}} where || sits between
+// two separate template expressions rather than inside a single one.
+// This is the form users naturally type in the UI.
+var splitFallbackRe = regexp.MustCompile(`\{\{([^{}|]+)\}\}\s*\|\|\s*\{\{([^{}|]+)\}\}`)
+
+// typeHintRe matches "{{key|number}}", "{{key|bool}}", "{{key|string}}" when wrapped in JSON quotes.
+// Allows repeated |type suffixes (e.g. {{key|number|number}}) caused by re-saving in the body builder.
+var typeHintRe = regexp.MustCompile(`"\{\{([^{}|]+)(?:\|(number|bool|string))+\}\}"`)
+
+// singleTypeHintRe matches when the ENTIRE string value is {{key|hint}} — no surrounding quotes.
+// Allows repeated |type suffixes.
+var singleTypeHintRe = regexp.MustCompile(`^\{\{([^{}|]+)(?:\|(number|bool|string))+\}\}$`)
+
+// singlePlaceholderRe matches when the ENTIRE string value is a bare {{key}} with no type hint.
+// Used to return the native Go value (map, slice, etc.) instead of stringifying it.
+var singlePlaceholderRe = regexp.MustCompile(`^\{\{([^{}|]+)\}\}$`)

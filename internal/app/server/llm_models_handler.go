@@ -47,9 +47,21 @@ func (s *Server) handleLLMModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// OpenRouter
-	if key := s.settings.Get("OPENROUTER_API_KEY"); key != "" {
-		orGroups, err := fetchOpenRouterModels(key)
+	// OpenRouter — try OPENROUTER_API_KEY first, then the first entry in OPENROUTER_KEYS
+	orKey := s.settings.Get("OPENROUTER_API_KEY")
+	if orKey == "" {
+		if keysJSON := s.settings.Get("OPENROUTER_KEYS"); keysJSON != "" {
+			var keys []struct {
+				Name string `json:"name"`
+				Key  string `json:"key"`
+			}
+			if err := json.Unmarshal([]byte(keysJSON), &keys); err == nil && len(keys) > 0 {
+				orKey = keys[0].Key
+			}
+		}
+	}
+	if orKey != "" {
+		orGroups, err := fetchOpenRouterModels(orKey)
 		if err != nil {
 			s.logger.Printf("[llm/models] openrouter error: %v", err)
 		} else {
@@ -220,4 +232,41 @@ func llmTruncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// handleOpenRouterKeys returns the names of all configured OpenRouter API keys.
+// Key values are never returned — only names. Returns an empty array if no keys are configured.
+func (s *Server) handleOpenRouterKeys(w http.ResponseWriter, r *http.Request) {
+	type keyName struct {
+		Name string `json:"name"`
+	}
+
+	if s.settings == nil {
+		s.respondJSON(w, http.StatusOK, []keyName{})
+		return
+	}
+
+	keysJSON := s.settings.Get("OPENROUTER_KEYS")
+	if keysJSON == "" {
+		s.respondJSON(w, http.StatusOK, []keyName{})
+		return
+	}
+
+	var raw []struct {
+		Name string `json:"name"`
+		Key  string `json:"key"`
+	}
+	if err := json.Unmarshal([]byte(keysJSON), &raw); err != nil {
+		s.logger.Printf("[openrouter/keys] parse OPENROUTER_KEYS: %v", err)
+		s.respondJSON(w, http.StatusOK, []keyName{})
+		return
+	}
+
+	out := make([]keyName, 0, len(raw))
+	for _, k := range raw {
+		if k.Name != "" {
+			out = append(out, keyName{Name: k.Name})
+		}
+	}
+	s.respondJSON(w, http.StatusOK, out)
 }

@@ -12,6 +12,9 @@ const STATUS_COLORS: Record<WorkflowStatus, { bg: string; color: string }> = {
   failed:    { bg: '#fdedec', color: '#c0392b' },
 }
 
+const ACTIVE_STATUSES: WorkflowStatus[] = ['pending', 'scheduled', 'running', 'paused']
+const TERMINAL_STATUSES: WorkflowStatus[] = ['completed', 'failed', 'cancelled']
+
 function StatusBadge({ status }: { status: WorkflowStatus }) {
   const c = STATUS_COLORS[status] ?? { bg: '#f0f0f0', color: '#555' }
   return (
@@ -26,11 +29,58 @@ function formatDate(s?: string) {
   return new Date(s).toLocaleString()
 }
 
-const STATUS_TABS: Array<WorkflowStatus | 'all'> = ['all', 'pending', 'running', 'paused', 'completed', 'failed', 'cancelled']
+function sortByStartedAt(list: Workflow[]): Workflow[] {
+  return [...list].sort((a, b) => {
+    const aTime = a.started_at ? new Date(a.started_at).getTime() : 0
+    const bTime = b.started_at ? new Date(b.started_at).getTime() : 0
+    return bTime - aTime
+  })
+}
+
+const TABLE_HEADERS = ['Name', 'Graph', 'Status', 'Current Node', 'Started', 'Finished', 'Actions']
+
+function WorkflowTableRows({ workflows, navigate, cancel, restart, deleteWorkflow }: {
+  workflows: Workflow[]
+  navigate: (path: string) => void
+  cancel: (id: string, e: React.MouseEvent) => void
+  restart: (id: string, e: React.MouseEvent) => void
+  deleteWorkflow: (id: string, name: string, e: React.MouseEvent) => void
+}) {
+  return (
+    <>
+      {workflows.map(wf => (
+        <tr key={wf.id} onClick={() => navigate(`/workflows/${wf.id}`)}
+          style={{ cursor: 'pointer', transition: 'background 0.1s' }}
+          onMouseEnter={e => (e.currentTarget.style.background = '#f8f9fa')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'white')}>
+          <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontWeight: 500 }}>
+            {wf.name || <span style={{ color: '#aaa' }}>{wf.id.slice(0, 8)}</span>}
+          </td>
+          <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '13px', color: '#667eea', fontFamily: 'monospace' }}>{wf.graph_name}</td>
+          <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed' }}><StatusBadge status={wf.status} /></td>
+          <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '13px', fontFamily: 'monospace', color: '#555' }}>{wf.current_node || '—'}</td>
+          <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '12px', color: '#888' }}>{formatDate(wf.started_at)}</td>
+          <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '12px', color: '#888' }}>{formatDate(wf.finished_at)}</td>
+          <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed' }} onClick={e => e.stopPropagation()}>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button onClick={e => { e.stopPropagation(); navigate(`/workflows/builder?graph=${encodeURIComponent(wf.graph_name)}`) }} style={actionBtn('#9b59b6')}>Edit</button>
+              {['running', 'paused', 'pending', 'scheduled'].includes(wf.status) && (
+                <button onClick={e => cancel(wf.id, e)} style={actionBtn('#e74c3c')}>Cancel</button>
+              )}
+              {['completed', 'failed', 'cancelled'].includes(wf.status) && (
+                <button onClick={e => restart(wf.id, e)} style={actionBtn('#667eea')}>Restart</button>
+              )}
+              <button onClick={e => deleteWorkflow(wf.id, wf.name, e)} style={actionBtn('#c0392b')}>Delete</button>
+            </div>
+          </td>
+        </tr>
+      ))}
+    </>
+  )
+}
 
 export default function WorkflowList() {
   const [workflows, setWorkflows] = useState<Workflow[]>([])
-  const [statusFilter, setStatusFilter] = useState<WorkflowStatus | 'all'>('all')
   const [loading, setLoading] = useState(true)
   const [createModal, setCreateModal] = useState(false)
   const [graphs, setGraphs] = useState<string[]>([])
@@ -38,17 +88,17 @@ export default function WorkflowList() {
   const [newGraph, setNewGraph] = useState('')
   const [newContext, setNewContext] = useState('{}')
   const [graphsExpanded, setGraphsExpanded] = useState(true)
+  const [historyExpanded, setHistoryExpanded] = useState(false)
   const navigate = useNavigate()
 
   const fetchWorkflows = useCallback(async () => {
-    const qs = statusFilter !== 'all' ? `?status=${statusFilter}` : ''
-    const res = await fetch(`/api/workflows${qs}`)
+    const res = await fetch('/api/workflows')
     if (res.ok) {
       const data = await res.json()
       setWorkflows(data.workflows ?? [])
     }
     setLoading(false)
-  }, [statusFilter])
+  }, [])
 
   const fetchGraphs = useCallback(async () => {
     const res = await fetch('/api/workflows/graphs')
@@ -85,7 +135,7 @@ export default function WorkflowList() {
   }, [])
 
   const openCreateModal = async () => {
-    setNewGraph(graphs[0] ?? '')
+    setNewGraph(sortedGraphs[0] ?? '')
     setNewName('')
     setNewContext('{}')
     setCreateModal(true)
@@ -125,6 +175,10 @@ export default function WorkflowList() {
     fetchWorkflows()
   }
 
+  const sortedGraphs = [...graphs].sort((a, b) => a.localeCompare(b))
+  const activeWorkflows = sortByStartedAt(workflows.filter(w => (ACTIVE_STATUSES as string[]).includes(w.status)))
+  const historyWorkflows = sortByStartedAt(workflows.filter(w => (TERMINAL_STATUSES as string[]).includes(w.status)))
+
   return (
     <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
@@ -149,76 +203,80 @@ export default function WorkflowList() {
             <span style={{ color: '#999', fontSize: '12px' }}>{graphsExpanded ? '▲ collapse' : '▼ expand'}</span>
           </div>
           {graphsExpanded && (
-            graphs.length === 0
+            sortedGraphs.length === 0
               ? <div style={{ padding: '16px', color: '#999', fontSize: '13px' }}>No graphs registered.</div>
-              : <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', padding: '12px 16px' }}>
-                  {graphs.map(g => (
-                    <div key={g} style={{ display: 'flex', alignItems: 'center', gap: '6px', background: '#f5f7fa', border: '1px solid #e0e6ed', borderRadius: '6px', padding: '6px 12px' }}>
+              : <div>
+                  {sortedGraphs.map((g, i) => (
+                    <div key={g} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', borderBottom: i < sortedGraphs.length - 1 ? '1px solid #f0f2f5' : 'none' }}>
                       <span style={{ fontFamily: 'monospace', fontSize: '13px', color: '#2c3e50' }}>{g}</span>
-                      <button onClick={() => navigate(`/workflows/builder?graph=${encodeURIComponent(g)}`)}
-                        style={{ background: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px', fontWeight: 500 }}>Edit</button>
-                      <button onClick={() => { setNewGraph(g); setNewName(''); setNewContext('{}'); setCreateModal(true) }}
-                        style={{ background: '#27ae60', color: 'white', border: 'none', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px', fontWeight: 500 }}>▶ Run</button>
+                      <div style={{ display: 'flex', gap: '6px' }}>
+                        <button onClick={() => navigate(`/workflows/builder?graph=${encodeURIComponent(g)}`)}
+                          style={{ background: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>Edit</button>
+                        <button onClick={() => { setNewGraph(g); setNewName(''); setNewContext('{}'); setCreateModal(true) }}
+                          style={{ background: '#27ae60', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>▶ Run</button>
+                      </div>
                     </div>
                   ))}
                 </div>
           )}
         </div>
 
-        {/* Status filter tabs */}
-        <div style={{ display: 'flex', gap: '6px', marginBottom: '16px', flexWrap: 'wrap' }}>
-          {STATUS_TABS.map(s => (
-            <button key={s} onClick={() => setStatusFilter(s)}
-              style={{ padding: '6px 14px', border: '1px solid #e0e6ed', borderRadius: '20px', cursor: 'pointer', fontSize: '13px', fontWeight: statusFilter === s ? 600 : 400, background: statusFilter === s ? '#667eea' : 'white', color: statusFilter === s ? 'white' : '#555' }}>
-              {s}
-            </button>
-          ))}
-        </div>
-
-        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
+        {/* Active workflows */}
+        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', overflow: 'hidden', marginBottom: '16px' }}>
           {loading ? (
             <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>Loading...</div>
-          ) : workflows.length === 0 ? (
-            <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>No workflows found.</div>
+          ) : activeWorkflows.length === 0 ? (
+            <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>No active workflows.</div>
           ) : (
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
-                  {['Name', 'Graph', 'Status', 'Current Node', 'Started', 'Finished', 'Actions'].map(h => (
+                  {TABLE_HEADERS.map(h => (
                     <th key={h} style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: 600, color: '#666', background: '#f8f9fa', borderBottom: '2px solid #e0e6ed', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {workflows.map(wf => (
-                  <tr key={wf.id} onClick={() => navigate(`/workflows/${wf.id}`)}
-                    style={{ cursor: 'pointer', transition: 'background 0.1s' }}
-                    onMouseEnter={e => (e.currentTarget.style.background = '#f8f9fa')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'white')}>
-                    <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontWeight: 500 }}>
-                      {wf.name || <span style={{ color: '#aaa' }}>{wf.id.slice(0, 8)}</span>}
-                    </td>
-                    <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '13px', color: '#667eea', fontFamily: 'monospace' }}>{wf.graph_name}</td>
-                    <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed' }}><StatusBadge status={wf.status} /></td>
-                    <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '13px', fontFamily: 'monospace', color: '#555' }}>{wf.current_node || '—'}</td>
-                    <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '12px', color: '#888' }}>{formatDate(wf.started_at)}</td>
-                    <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '12px', color: '#888' }}>{formatDate(wf.finished_at)}</td>
-                    <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed' }} onClick={e => e.stopPropagation()}>
-                      <div style={{ display: 'flex', gap: '6px' }}>
-                        <button onClick={e => { e.stopPropagation(); navigate(`/workflows/builder?graph=${encodeURIComponent(wf.graph_name)}`) }} style={actionBtn('#9b59b6')}>Edit</button>
-                        {['running', 'paused', 'pending', 'scheduled'].includes(wf.status) && (
-                          <button onClick={e => cancel(wf.id, e)} style={actionBtn('#e74c3c')}>Cancel</button>
-                        )}
-                        {['completed', 'failed', 'cancelled'].includes(wf.status) && (
-                          <button onClick={e => restart(wf.id, e)} style={actionBtn('#667eea')}>Restart</button>
-                        )}
-                        <button onClick={e => deleteWorkflow(wf.id, wf.name, e)} style={actionBtn('#c0392b')}>Delete</button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
+                <WorkflowTableRows
+                  workflows={activeWorkflows}
+                  navigate={navigate}
+                  cancel={cancel}
+                  restart={restart}
+                  deleteWorkflow={deleteWorkflow}
+                />
               </tbody>
             </table>
+          )}
+        </div>
+
+        {/* History accordion */}
+        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
+          <div onClick={() => setHistoryExpanded(e => !e)}
+            style={{ padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', borderBottom: historyExpanded ? '1px solid #e0e6ed' : 'none' }}>
+            <span style={{ fontWeight: 600, fontSize: '13px', color: '#444', textTransform: 'uppercase', letterSpacing: '0.5px' }}>History ({historyWorkflows.length})</span>
+            <span style={{ color: '#999', fontSize: '12px' }}>{historyExpanded ? '▲ collapse' : '▼ expand'}</span>
+          </div>
+          {historyExpanded && (
+            historyWorkflows.length === 0
+              ? <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>No history.</div>
+              : <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      {TABLE_HEADERS.map(h => (
+                        <th key={h} style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: 600, color: '#666', background: '#f8f9fa', borderBottom: '2px solid #e0e6ed', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <WorkflowTableRows
+                      workflows={historyWorkflows}
+                      navigate={navigate}
+                      cancel={cancel}
+                      restart={restart}
+                      deleteWorkflow={deleteWorkflow}
+                    />
+                  </tbody>
+                </table>
           )}
         </div>
       </div>
@@ -233,7 +291,7 @@ export default function WorkflowList() {
                 <label style={{ fontSize: '12px', color: '#666', fontWeight: 600, display: 'block', marginBottom: '4px' }}>Workflow</label>
                 <select value={newGraph} onChange={e => setNewGraph(e.target.value)}
                   style={{ width: '100%', padding: '8px', border: '1px solid #e0e6ed', borderRadius: '4px', fontSize: '13px', fontFamily: 'monospace' }}>
-                  {graphs.map(g => <option key={g} value={g}>{g}</option>)}
+                  {sortedGraphs.map(g => <option key={g} value={g}>{g}</option>)}
                 </select>
               </div>
               <div>
