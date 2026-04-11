@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Workflow, WorkflowStatus } from './types'
+import Nav from './Nav'
 
 const STATUS_COLORS: Record<WorkflowStatus, { bg: string; color: string }> = {
   pending:   { bg: '#e8f4fd', color: '#2980b9' },
@@ -13,7 +14,6 @@ const STATUS_COLORS: Record<WorkflowStatus, { bg: string; color: string }> = {
 }
 
 const ACTIVE_STATUSES: WorkflowStatus[] = ['pending', 'scheduled', 'running', 'paused']
-const TERMINAL_STATUSES: WorkflowStatus[] = ['completed', 'failed', 'cancelled']
 
 function StatusBadge({ status }: { status: WorkflowStatus }) {
   const c = STATUS_COLORS[status] ?? { bg: '#f0f0f0', color: '#555' }
@@ -88,7 +88,6 @@ export default function WorkflowList() {
   const [newGraph, setNewGraph] = useState('')
   const [newContext, setNewContext] = useState('{}')
   const [graphsExpanded, setGraphsExpanded] = useState(true)
-  const [historyExpanded, setHistoryExpanded] = useState(false)
   const navigate = useNavigate()
 
   const fetchWorkflows = useCallback(async () => {
@@ -175,22 +174,28 @@ export default function WorkflowList() {
     fetchWorkflows()
   }
 
+  const duplicateGraph = async (g: string) => {
+    const res = await fetch(`/api/workflows/graphs/${encodeURIComponent(g)}/duplicate`, { method: 'POST' })
+    if (res.ok) {
+      await fetchGraphs()
+    } else {
+      alert(`Failed to duplicate graph "${g}"`)
+    }
+  }
+
   const sortedGraphs = [...graphs].sort((a, b) => a.localeCompare(b))
   const activeWorkflows = sortByStartedAt(workflows.filter(w => (ACTIVE_STATUSES as string[]).includes(w.status)))
-  const historyWorkflows = sortByStartedAt(workflows.filter(w => (TERMINAL_STATUSES as string[]).includes(w.status)))
 
   return (
-    <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ flex: 1, overflow: 'auto', background: '#f5f7fa' }}>
+
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <h1 style={{ fontSize: '20px', color: '#667eea', fontWeight: 600, margin: 0 }}>Workflows</h1>
         <div style={{ display: 'flex', gap: '10px' }}>
           <button onClick={() => navigate('/workflows/builder')} style={navBtn('#9b59b6')}>+ New Workflow</button>
           <button onClick={openCreateModal} style={navBtn('#27ae60')}>▶ Run</button>
-          <button onClick={() => navigate('/triggers')} style={navBtn('#e67e22')}>Triggers</button>
-          <button onClick={() => navigate('/settings')} style={navBtn('#6b46c1')}>Settings</button>
-          <a href="/logs" style={navBtn('#667eea')}>Logs</a>
-          <a href="/_/" style={navBtn('#667eea')}>Admin</a>
-          <a href="/logout" style={navBtn('#e74c3c')}>Logout</a>
         </div>
       </header>
 
@@ -212,6 +217,8 @@ export default function WorkflowList() {
                       <div style={{ display: 'flex', gap: '6px' }}>
                         <button onClick={() => navigate(`/workflows/builder?graph=${encodeURIComponent(g)}`)}
                           style={{ background: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>Edit</button>
+                        <button onClick={() => duplicateGraph(g)}
+                          style={{ background: '#2980b9', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>Duplicate</button>
                         <button onClick={() => { setNewGraph(g); setNewName(''); setNewContext('{}'); setCreateModal(true) }}
                           style={{ background: '#27ae60', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>▶ Run</button>
                       </div>
@@ -249,36 +256,6 @@ export default function WorkflowList() {
           )}
         </div>
 
-        {/* History accordion */}
-        <div style={{ background: 'white', borderRadius: '8px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
-          <div onClick={() => setHistoryExpanded(e => !e)}
-            style={{ padding: '12px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', borderBottom: historyExpanded ? '1px solid #e0e6ed' : 'none' }}>
-            <span style={{ fontWeight: 600, fontSize: '13px', color: '#444', textTransform: 'uppercase', letterSpacing: '0.5px' }}>History ({historyWorkflows.length})</span>
-            <span style={{ color: '#999', fontSize: '12px' }}>{historyExpanded ? '▲ collapse' : '▼ expand'}</span>
-          </div>
-          {historyExpanded && (
-            historyWorkflows.length === 0
-              ? <div style={{ padding: '40px', textAlign: 'center', color: '#999' }}>No history.</div>
-              : <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                  <thead>
-                    <tr>
-                      {TABLE_HEADERS.map(h => (
-                        <th key={h} style={{ padding: '12px 16px', textAlign: 'left', fontSize: '12px', fontWeight: 600, color: '#666', background: '#f8f9fa', borderBottom: '2px solid #e0e6ed', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <WorkflowTableRows
-                      workflows={historyWorkflows}
-                      navigate={navigate}
-                      cancel={cancel}
-                      restart={restart}
-                      deleteWorkflow={deleteWorkflow}
-                    />
-                  </tbody>
-                </table>
-          )}
-        </div>
       </div>
 
       {/* Create workflow modal */}
@@ -313,6 +290,7 @@ export default function WorkflowList() {
           </div>
         </div>
       )}
+      </div>
     </div>
   )
 }

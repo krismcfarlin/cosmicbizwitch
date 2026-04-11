@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import type { Workflow, ActivityInstance, ActivityGraph, WorkflowStatus, ActivityStatus } from './types'
 import WorkflowGraph from './WorkflowGraph'
+import Nav from './Nav'
 
 const STATUS_COLORS: Record<WorkflowStatus | ActivityStatus, { bg: string; color: string }> = {
   pending:       { bg: '#e8f4fd', color: '#2980b9' },
@@ -334,7 +335,9 @@ export default function WorkflowDetail() {
   if (!workflow) return <div style={{ padding: '40px', textAlign: 'center', color: '#e74c3c' }}>Workflow not found.</div>
 
   return (
-    <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ flex: 1, overflow: 'auto', background: '#f5f7fa' }}>
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <button onClick={() => navigate('/workflows')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#667eea', fontSize: '18px', padding: 0 }}>←</button>
@@ -356,7 +359,6 @@ export default function WorkflowDetail() {
               {restarting ? 'Restarting...' : 'Restart'}
             </button>
           )}
-          <a href="/logout" style={{ ...btn('#95a5a6'), textDecoration: 'none' }}>Logout</a>
         </div>
       </header>
 
@@ -504,6 +506,7 @@ export default function WorkflowDetail() {
           </div>
         </div>
       )}
+      </div>
     </div>
   )
 }

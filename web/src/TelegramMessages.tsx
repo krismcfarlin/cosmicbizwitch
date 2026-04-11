@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
+import Nav from './Nav'
 
 interface TelegramMessage {
   id: string
@@ -67,7 +68,9 @@ export default function TelegramMessages() {
   }
 
   return (
-    <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ flex: 1, overflow: 'auto', background: '#f5f7fa' }}>
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <h1 style={{ fontSize: '20px', color: '#667eea', fontWeight: 600, margin: 0 }}>Telegram Messages</h1>
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
@@ -84,9 +87,6 @@ export default function TelegramMessages() {
           <button onClick={clearAll} disabled={clearing} style={{ ...navBtn('#e74c3c'), opacity: clearing ? 0.7 : 1, cursor: clearing ? 'default' : 'pointer' }}>
             {clearing ? 'Clearing...' : 'Clear All'}
           </button>
-          <button onClick={() => navigate('/triggers')} style={navBtn('#667eea')}>Triggers</button>
-          <button onClick={() => navigate('/workflows')} style={navBtn('#667eea')}>Workflows</button>
-          <a href="/logout" style={navBtn('#e74c3c')}>Logout</a>
         </div>
       </header>
 
@@ -138,6 +138,7 @@ export default function TelegramMessages() {
             </table>
           )}
         </div>
+      </div>
       </div>
     </div>
   )

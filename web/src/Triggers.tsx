@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import Nav from './Nav'
 
 interface Trigger {
   id: string
@@ -151,16 +152,13 @@ export default function Triggers() {
   }
 
   return (
-    <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ flex: 1, overflow: 'auto', background: '#f5f7fa' }}>
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <h1 style={{ fontSize: '20px', color: '#667eea', fontWeight: 600, margin: 0 }}>Triggers</h1>
         <div style={{ display: 'flex', gap: '10px' }}>
           <button onClick={openCreate} style={navBtn('#27ae60')}>+ New Trigger</button>
-          <button onClick={() => navigate('/workflows')} style={navBtn('#667eea')}>Workflows</button>
-          <button onClick={() => navigate('/telegram/messages')} style={navBtn('#2563eb')}>Telegram Debug</button>
-          <button onClick={() => navigate('/settings')} style={navBtn('#6b46c1')}>Settings</button>
-          <a href="/logs" style={navBtn('#667eea')}>Logs</a>
-          <a href="/logout" style={navBtn('#e74c3c')}>Logout</a>
         </div>
       </header>
 
@@ -388,6 +386,7 @@ export default function Triggers() {
           </div>
         </div>
       )}
+      </div>
     </div>
   )
 }

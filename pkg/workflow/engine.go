@@ -27,7 +27,7 @@ type ActivityMeta struct {
 // FieldMeta describes one input or output field of an activity.
 type FieldMeta struct {
 	Name        string   `json:"name"`
-	Type        string   `json:"type"`        // "string", "number", "boolean", "any", "gdrive_folder", "gdrive_file"
+	Type        string   `json:"type"`        // "string", "number", "boolean", "any", "gdrive_folder", "gdrive_file", "context_key"
 	Description string   `json:"description,omitempty"`
 	Required    bool     `json:"required,omitempty"`
 	Options     []string `json:"options,omitempty"` // if set, renders as a select dropdown in the UI

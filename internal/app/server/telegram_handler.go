@@ -116,9 +116,15 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 			chatID = cq.Message.Chat.ID
 		}
 
+		var callbackData any = cq.Data
+		var parsedData map[string]any
+		if json.Unmarshal([]byte(cq.Data), &parsedData) == nil {
+			callbackData = parsedData
+		}
+
 		cbPayload := map[string]any{
 			"callback_query_id": cq.ID,
-			"callback_data":     cq.Data,
+			"callback_data":     callbackData,
 			"chat_id":           chatID,
 			"user_id":           cq.From.ID,
 			"username":          cq.From.Username,

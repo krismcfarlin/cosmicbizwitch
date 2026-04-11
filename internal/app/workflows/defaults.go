@@ -36,6 +36,7 @@ func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfun
 	registerTelegramActivities(eng, getTelegram, app)
 	registerTemplateFill(eng)
 	registerTextSubstitute(eng)
+	registerFormatDate(eng)
 	registerRunWorkflow(eng)
 	registerAstrologyActivities(eng)
 	return registerGraphs(eng, getCF)
@@ -1746,6 +1747,141 @@ func registerTextSubstitute(eng *workflow.Engine) {
 			},
 		},
 	)
+}
+
+func registerFormatDate(eng *workflow.Engine) {
+	parsLayouts := []string{
+		"2006-01-02 15:04:05.000Z",
+		"2006-01-02 15:04:05.999Z07:00",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05",
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.000Z",
+		"2006-01-02",
+		"01/02/2006",
+		"January 2, 2006",
+	}
+
+	eng.RegisterActivityWithMeta("format_date",
+		func(_ context.Context, input map[string]any) (map[string]any, error) {
+			keyName, _ := input["value"].(string)
+			if keyName == "" {
+				return nil, fmt.Errorf("format_date: value (context key) is required")
+			}
+			format, _ := input["format"].(string)
+			if format == "" {
+				return nil, fmt.Errorf("format_date: format is required")
+			}
+
+			// Resolve the value via dot-path traversal (e.g. "pb_contact.records.0.birthday").
+			raw := resolveNestedInput(input, keyName)
+
+			var t time.Time
+			switch v := raw.(type) {
+			case time.Time:
+				t = v
+			case string:
+				if v == "" {
+					return nil, fmt.Errorf("format_date: context key %q is empty", keyName)
+				}
+				var parseErr error
+				for _, layout := range parsLayouts {
+					t, parseErr = time.Parse(layout, v)
+					if parseErr == nil {
+						break
+					}
+				}
+				if parseErr != nil {
+					return nil, fmt.Errorf("format_date: could not parse %q as a date", v)
+				}
+			default:
+				return nil, fmt.Errorf("format_date: context key %q is not a string or time.Time (got %T)", keyName, raw)
+			}
+
+			setNestedInput(input, keyName, t.Format(format))
+			// Return the top-level key so the engine merges the mutated structure back.
+			topKey := strings.SplitN(keyName, ".", 2)[0]
+			return map[string]any{topKey: input[topKey]}, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "Utility",
+			Description: "Parses a date string from a context key and reformats it in-place using a Go layout string.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "value", Type: "context_key", Required: true, Description: "Context key containing the date string to reformat (e.g. birthday)."},
+				{Name: "format", Type: "string", Required: true, Description: "Go time layout string for output. Common formats: \"January 2, 2006\" · \"01/02/2006\" · \"02 Jan 2006\" · \"2006-01-02\" · \"Jan 2, 2006\" · \"Monday, January 2, 2006\""},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "<value>", Type: "string", Description: "The reformatted date written back to the same context key that was selected."},
+			},
+		},
+	)
+}
+
+// resolveNestedInput looks up a dot-notation key (e.g. "pb_contact.records.0.birthday")
+// from the activity input map, traversing nested maps and slices as needed.
+func resolveNestedInput(input map[string]any, key string) any {
+	if v, ok := input[key]; ok {
+		return v
+	}
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	var cur any = map[string]any(input)
+	for _, p := range parts {
+		switch v := cur.(type) {
+		case map[string]any:
+			val, ok := v[p]
+			if !ok {
+				return nil
+			}
+			cur = val
+		case []any:
+			i, err := strconv.Atoi(p)
+			if err != nil || i < 0 || i >= len(v) {
+				return nil
+			}
+			cur = v[i]
+		default:
+			return nil
+		}
+	}
+	return cur
+}
+
+// setNestedInput writes value to a dot-notation path inside the input map,
+// mutating nested maps/slices in-place (they share references with the workflow context).
+func setNestedInput(input map[string]any, key string, value any) {
+	parts := strings.Split(key, ".")
+	if len(parts) == 1 {
+		input[key] = value
+		return
+	}
+	var cur any = map[string]any(input)
+	for i, p := range parts {
+		isLast := i == len(parts)-1
+		switch v := cur.(type) {
+		case map[string]any:
+			if isLast {
+				v[p] = value
+				return
+			}
+			cur = v[p]
+		case []any:
+			idx, err := strconv.Atoi(p)
+			if err != nil || idx < 0 || idx >= len(v) {
+				return
+			}
+			if isLast {
+				v[idx] = value
+				return
+			}
+			cur = v[idx]
+		default:
+			return
+		}
+	}
 }
 
 // ── Graphs ────────────────────────────────────────────────────────────────────

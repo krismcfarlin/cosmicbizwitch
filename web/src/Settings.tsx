@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import Nav from './Nav'
 
 interface Setting {
   key: string
@@ -266,16 +267,11 @@ export default function Settings() {
   }
 
   return (
-    <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ flex: 1, overflow: 'auto', background: '#f5f7fa' }}>
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <h1 style={{ fontSize: '20px', color: '#6b46c1', fontWeight: 600, margin: 0 }}>Settings</h1>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          <a href="/" style={navBtn('#667eea')}>Home</a>
-          <button onClick={() => navigate('/workflows')} style={navBtn('#667eea')}>Workflows</button>
-          <button onClick={() => navigate('/triggers')} style={navBtn('#667eea')}>Triggers</button>
-          <a href="/logs" style={navBtn('#667eea')}>Logs</a>
-          <a href="/logout" style={navBtn('#e74c3c')}>Logout</a>
-        </div>
       </header>
 
       <div style={{ padding: '20px 24px', maxWidth: '760px', display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -666,6 +662,7 @@ export default function Settings() {
             </div>
           </div>
         </div>
+      </div>
       </div>
     </div>
   )

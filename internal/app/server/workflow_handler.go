@@ -267,6 +267,39 @@ func inputKeys(m map[string]any) []string {
 	return keys
 }
 
+// handleGraphDuplicate duplicates an existing graph under a new name ("Copy of <original>").
+// POST /api/workflows/graphs/{name}/duplicate
+func (s *Server) handleGraphDuplicate(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	src, ok := s.engine.GetGraph(name)
+	if !ok {
+		http.Error(w, "graph not found", http.StatusNotFound)
+		return
+	}
+
+	// Build a deep copy via JSON round-trip.
+	data, err := json.Marshal(src)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "marshal graph failed", err)
+		return
+	}
+	var copy workflow.ActivityGraph
+	if err := json.Unmarshal(data, &copy); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "unmarshal graph failed", err)
+		return
+	}
+	copy.Name = "Copy of " + name
+
+	if err := s.engine.RegisterGraph(&copy); err != nil {
+		s.respondError(w, http.StatusBadRequest, "register duplicate graph failed", err)
+		return
+	}
+	if err := s.engine.Store().PersistGraph(r.Context(), &copy); err != nil {
+		s.logger.Printf("[workflow] failed to persist duplicate graph %q: %v", copy.Name, err)
+	}
+	s.respondJSON(w, http.StatusCreated, map[string]any{"graph": copy})
+}
+
 // handleWorkflowGraphs returns all registered graph definitions.
 // GET /api/workflows/graphs
 func (s *Server) handleWorkflowGraphs(w http.ResponseWriter, r *http.Request) {

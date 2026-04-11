@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
+import Nav from './Nav'
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -2563,6 +2564,61 @@ function ContextFieldPicker({ value, fieldName, debugContext, onChange }: {
   )
 }
 
+// ── ContextKeyPicker ──────────────────────────────────────────────────────────
+// Like ContextFieldPicker but stores the bare key name (no {{}}),
+// used when the activity needs the key name itself (e.g. format_date).
+
+function ContextKeyPicker({ value, onChange, debugContext }: {
+  value: string
+  onChange: (v: string) => void
+  debugContext: string
+}) {
+  const [picking, setPicking] = useState(false)
+  const ctxKeys: string[] = (() => {
+    try {
+      const ctx = JSON.parse(debugContext || '{}')
+      const out: string[] = []
+      collectLeafPaths(ctx, '', 0, out)
+      return out.filter(p => p !== '' && !p.startsWith('_'))
+    } catch { return [] }
+  })()
+
+  const sharedStyle = { width: '100%', padding: '5px 7px', border: '1px solid #d0d5dd', borderRadius: '4px', fontSize: '12px', boxSizing: 'border-box' as const, marginBottom: '4px' }
+
+  if (picking) {
+    return (
+      <select
+        autoFocus
+        value=""
+        onChange={e => { if (e.target.value) { onChange(e.target.value); setPicking(false) } }}
+        onBlur={() => setPicking(false)}
+        style={{ ...sharedStyle, background: 'white' }}
+      >
+        <option value="">— pick context key —</option>
+        {ctxKeys.map(k => <option key={k} value={k}>{k}</option>)}
+      </select>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', gap: '4px', alignItems: 'center', marginBottom: '4px' }}>
+      <input
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={{ ...sharedStyle, marginBottom: 0, fontFamily: 'monospace', flex: 1 }}
+        placeholder="select or type a context key"
+      />
+      {ctxKeys.length > 0 && (
+        <button
+          onClick={() => setPicking(true)}
+          title="Pick from context"
+          style={{ padding: '4px 8px', border: '1px solid #d0d5dd', borderRadius: '4px', background: 'white', cursor: 'pointer', fontSize: '12px', whiteSpace: 'nowrap' }}
+        >▾</button>
+      )}
+    </div>
+  )
+}
+
 // ── DrivePicker ───────────────────────────────────────────────────────────────
 
 interface DrivePickerProps {
@@ -4461,6 +4517,12 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
                   debugContext={debugContext}
                   onChange={v => setInput(f.name, v)}
                 />
+              ) : (f.type === 'context_key') ? (
+                <ContextKeyPicker
+                  value={(node.staticInput ?? {})[f.name] ?? ''}
+                  onChange={v => setInput(f.name, v)}
+                  debugContext={debugContext}
+                />
               ) : (f.type === 'boolean') ? (
                 <BooleanToggle
                   value={(node.staticInput ?? {})[f.name] === 'true'}
@@ -5337,12 +5399,20 @@ export default function WorkflowBuilder() {
     let key = cond.key.trim()
     if (key.startsWith('{{') && key.endsWith('}}')) key = key.slice(2, -2).trim()
     const value = resolvePath(key, ctx)
+    const toNum = (v: unknown): number | null => {
+      const n = Number(v)
+      return isNaN(n) ? null : n
+    }
     switch (cond.operator) {
       case 'exists':     return value !== undefined && value !== null
       case 'not_exists': return value === undefined || value === null
       case 'eq':         return String(value ?? '') === String(cond.value)
       case 'neq':        return String(value ?? '') !== String(cond.value)
       case 'contains':   return String(value ?? '').includes(String(cond.value))
+      case 'gte': { const a = toNum(value), b = toNum(cond.value); return a !== null && b !== null && a >= b }
+      case 'lte': { const a = toNum(value), b = toNum(cond.value); return a !== null && b !== null && a <= b }
+      case 'gt':  { const a = toNum(value), b = toNum(cond.value); return a !== null && b !== null && a > b }
+      case 'lt':  { const a = toNum(value), b = toNum(cond.value); return a !== null && b !== null && a < b }
       default:           return false
     }
   }, [])
@@ -5606,11 +5676,12 @@ export default function WorkflowBuilder() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden', background: '#f5f7fa' }}>
 
       {/* Header */}
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '10px 16px', display: 'flex', alignItems: 'center', gap: '12px', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
-        <button onClick={() => navigate('/workflows')} style={hBtn('#667eea')}>← Workflows</button>
         <h1 style={{ margin: 0, fontSize: '18px', color: '#667eea', fontWeight: 600 }}>Workflow Builder</h1>
         <div style={{ flex: 1 }} />
         <label style={{ fontSize: '12px', color: '#666', fontWeight: 600 }}>Graph Name:</label>
@@ -6041,14 +6112,67 @@ export default function WorkflowBuilder() {
                         Error in {lastDebugResult.activityName}:{'\n'}{lastDebugResult.error}
                       </div>
                     ) : (
-                      <div style={{ color: '#86efac', whiteSpace: 'pre-wrap' }}>
-                        {JSON.stringify(
-                          lastDebugResult.output && typeof lastDebugResult.output === 'object'
-                            ? Object.fromEntries(Object.entries(lastDebugResult.output as Record<string, unknown>).filter(([k]) => k !== 'curl'))
-                            : lastDebugResult.output,
-                          null, 2
-                        )}
-                      </div>
+                      <>
+                        <div style={{ color: '#86efac', whiteSpace: 'pre-wrap' }}>
+                          {JSON.stringify(
+                            lastDebugResult.output && typeof lastDebugResult.output === 'object'
+                              ? Object.fromEntries(Object.entries(lastDebugResult.output as Record<string, unknown>).filter(([k]) => k !== 'curl'))
+                              : lastDebugResult.output,
+                            null, 2
+                          )}
+                        </div>
+                        {(() => {
+                          const ctx = (lastDebugResult.output && typeof lastDebugResult.output === 'object')
+                            ? lastDebugResult.output as Record<string, unknown>
+                            : {}
+                          const outEdges = edges.filter(e => e.fromNode === lastDebugResult.nodeId)
+                          if (outEdges.length === 0) return null
+                          return (
+                            <div style={{ marginTop: '10px', borderTop: '1px solid #2d2d4e', paddingTop: '8px' }}>
+                              <div style={{ fontSize: '10px', fontWeight: 700, color: '#9b8fd4', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '6px' }}>
+                                Transition Evaluation
+                              </div>
+                              {outEdges.map(edge => {
+                                const toNode = nodes.find(n => n.id === edge.toNode)
+                                const label = toNode?.label || toNode?.activityName || edge.toNode || 'END'
+                                if (edge.conditions.length === 0) {
+                                  return (
+                                    <div key={edge.id} style={{ marginBottom: '4px', color: '#94a3b8', fontSize: '11px' }}>
+                                      <span style={{ color: '#4ade80', fontWeight: 700 }}>✓</span> → <span style={{ color: '#e2e8f0' }}>{label}</span> <span style={{ color: '#64748b' }}>(unconditional)</span>
+                                    </div>
+                                  )
+                                }
+                                return (
+                                  <div key={edge.id} style={{ marginBottom: '8px' }}>
+                                    <div style={{ color: '#94a3b8', fontSize: '10px', marginBottom: '2px' }}>→ <span style={{ color: '#e2e8f0' }}>{label}</span></div>
+                                    {edge.conditions.map((c, i) => {
+                                      let key = c.key.trim()
+                                      if (key.startsWith('{{') && key.endsWith('}}')) key = key.slice(2, -2).trim()
+                                      const resolved = resolvePath(key, ctx)
+                                      const result = evalDebugCondition(c, ctx)
+                                      return (
+                                        <div key={i} style={{ fontSize: '11px', fontFamily: 'monospace', paddingLeft: '8px', marginBottom: '2px' }}>
+                                          <span style={{ color: result ? '#4ade80' : '#f87171', fontWeight: 700 }}>{result ? '✓' : '✗'}</span>
+                                          {' '}
+                                          <span style={{ color: '#fbbf24' }}>{c.key}</span>
+                                          {' = '}
+                                          <span style={{ color: '#7dd3fc' }}>{JSON.stringify(resolved)}</span>
+                                          <span style={{ color: '#64748b' }}> ({typeof resolved})</span>
+                                          {' '}
+                                          <span style={{ color: '#c084fc' }}>{c.operator}</span>
+                                          {' '}
+                                          <span style={{ color: '#86efac' }}>{JSON.stringify(c.value)}</span>
+                                          <span style={{ color: '#64748b' }}> ({typeof c.value})</span>
+                                        </div>
+                                      )
+                                    })}
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          )
+                        })()}
+                      </>
                     )
                   ) : (
                     <div style={{ color: '#4b5563' }}>No steps run yet. Click "Step" to execute the current node.</div>
@@ -6207,6 +6331,7 @@ export default function WorkflowBuilder() {
           onRun={runTestFromNode}
         />
       )}
+      </div>
     </div>
   )
 }

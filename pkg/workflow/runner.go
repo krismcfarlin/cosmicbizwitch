@@ -166,21 +166,35 @@ func (e *Engine) runWorkflow(ctx context.Context, wf *Workflow) {
 			return
 		}
 
-		// Evaluate transitions to find the next node.
-		// When inst.Output is nil (e.g. the node was skipped), evaluate
-		// conditions against the full workflow context so that conditions
-		// like "{{message.voice.file_id}} exists" can still resolve correctly.
-		transitionCtx := inst.Output
-		if transitionCtx == nil {
-			transitionCtx = wf.Context
+		// Evaluate transitions against the full workflow context (which includes
+		// the just-merged activity output plus all prior context). This ensures
+		// conditions can reference any key regardless of which activity set it.
+		if currentNode := graph.Nodes[nodeID]; currentNode != nil && len(currentNode.Transitions) > 0 {
+			for _, t := range currentNode.Transitions {
+				allMatch := true
+				for _, c := range t.Conditions {
+					raw, exists := lookupPath(c.Key, wf.Context)
+					result := evalCondition(c, wf.Context)
+					if !result {
+						allMatch = false
+					}
+					e.logger.Printf("[workflow] cond: node=%s next=%q  key=%q(%T) op=%q  ctxVal=%v(%T) exists=%v  condVal=%v(%T)  → %v",
+						nodeID, t.NextNode, c.Key, c.Key, c.Operator, raw, raw, exists, c.Value, c.Value, result)
+				}
+				if len(t.Conditions) == 0 {
+					e.logger.Printf("[workflow] cond: node=%s next=%q  (unconditional) → true", nodeID, t.NextNode)
+				} else {
+					e.logger.Printf("[workflow] cond: node=%s next=%q  allMatch=%v", nodeID, t.NextNode, allMatch)
+				}
+			}
 		}
-		nextNodeID, found := graph.NextNode(nodeID, transitionCtx)
+		nextNodeID, found := graph.NextNode(nodeID, wf.Context)
 		if !found {
 			node := graph.Nodes[nodeID]
 			if node != nil && len(node.Transitions) == 0 {
 				e.logger.Printf("[workflow] node %s (%s) has no transitions — workflow ends here. Connect it to the next node in the builder.", nodeID, node.ActivityName)
 			} else {
-				e.logger.Printf("[workflow] node %s: no transition matched output keys=%v — workflow ends here.", nodeID, outputKeys(inst.Output))
+				e.logger.Printf("[workflow] node %s: no transition matched context keys=%v — workflow ends here.", nodeID, outputKeys(wf.Context))
 			}
 			e.completeWorkflow(ctx, wf)
 			return

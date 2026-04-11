@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import Nav from './Nav'
 
 interface LogLine {
   Time: string
@@ -81,25 +82,24 @@ export default function LogViewer() {
   })
 
   return (
-    <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ flex: 1, overflow: 'hidden', background: '#f5f7fa', display: 'flex', flexDirection: 'column' }}>
 
       {/* Header */}
-      <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
+      <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)', flexShrink: 0 }}>
         <h1 style={{ fontSize: '20px', color: '#667eea', fontWeight: 600 }}>Server Logs</h1>
         <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
           <span style={{ fontSize: '12px', fontWeight: 600, color: connected ? '#4ec9b0' : '#f48771' }}>
             {connected ? '● ' : '○ '}{status}
           </span>
-          <a href="/" style={navBtn('#667eea')}>Home</a>
-          <a href="/_/" style={navBtn('#667eea')}>Admin</a>
-          <a href="/logout" style={navBtn('#e74c3c')}>Logout</a>
         </div>
       </header>
 
-      <div style={{ padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ padding: '16px 24px', display: 'flex', flexDirection: 'column', gap: '12px', flex: 1, overflow: 'hidden' }}>
 
         {/* Toolbar */}
-        <div style={{ background: 'white', borderRadius: '8px', padding: '12px 16px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ background: 'white', borderRadius: '8px', padding: '12px 16px', boxShadow: '0 2px 8px rgba(0,0,0,0.06)', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', flexShrink: 0 }}>
           <input
             type="text"
             placeholder="Filter logs..."
@@ -130,7 +130,7 @@ export default function LogViewer() {
         </div>
 
         {/* Log output */}
-        <div style={{ fontFamily: '"SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace', fontSize: '12px', background: '#1e1e1e', color: '#d4d4d4', padding: '16px', borderRadius: '8px', overflowY: 'auto', height: 'calc(100vh - 160px)', lineHeight: 1.6 }}>
+        <div style={{ fontFamily: '"SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace', fontSize: '12px', background: '#1e1e1e', color: '#d4d4d4', padding: '16px', borderRadius: '8px', overflowY: 'auto', flex: 1, lineHeight: 1.6 }}>
           {filtered.length === 0 ? (
             <div style={{ color: '#555', textAlign: 'center', padding: '60px 0' }}>
               {lines.length === 0 ? 'Waiting for log entries...' : 'No lines match the current filter.'}
@@ -148,10 +148,7 @@ export default function LogViewer() {
           )}
         </div>
       </div>
+      </div>
     </div>
   )
-}
-
-function navBtn(bg: string): React.CSSProperties {
-  return { background: bg, color: 'white', padding: '6px 14px', borderRadius: '4px', textDecoration: 'none', fontSize: '13px', fontWeight: 500 }
 }
