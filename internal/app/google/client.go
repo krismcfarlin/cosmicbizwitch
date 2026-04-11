@@ -465,6 +465,22 @@ func (c *Client) ShareFile(ctx context.Context, fileID, email, role string) (str
 	return resp.ID, nil
 }
 
+// MakePublic grants anyone-with-link reader access to fileID.
+func (c *Client) MakePublic(ctx context.Context, fileID string) error {
+	payload := map[string]any{
+		"role": "reader",
+		"type": "anyone",
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	u := "https://www.googleapis.com/drive/v3/files/" + url.PathEscape(fileID) +
+		"/permissions?fields=id"
+	_, err = c.doRequest(ctx, http.MethodPost, u, data)
+	return err
+}
+
 // GetDocumentContent fetches the text content of a Google Doc.
 // Extracts all text from the document body elements.
 func (c *Client) GetDocumentContent(ctx context.Context, docID string) (string, error) {
@@ -505,6 +521,120 @@ func (c *Client) GetDocumentContent(ctx context.Context, docID string) (string, 
 	}
 
 	return text.String(), nil
+}
+
+// DownloadFile downloads the binary content of a Drive file by ID.
+// Returns the file bytes and the Content-Type from the response headers.
+// Use this for binary files (audio, video, images) rather than Google Workspace formats.
+func (c *Client) DownloadFile(ctx context.Context, fileID string) ([]byte, string, error) {
+	tok, err := c.tm.GetAccessToken()
+	if err != nil {
+		return nil, "", fmt.Errorf("get access token: %w", err)
+	}
+
+	u := "https://www.googleapis.com/drive/v3/files/" + url.PathEscape(fileID) + "?alt=media"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("HTTP GET %s: %w", u, err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		preview := string(body)
+		if len(preview) > 400 {
+			preview = preview[:400]
+		}
+		return nil, "", fmt.Errorf("Google Drive download error %d: %s", resp.StatusCode, preview)
+	}
+
+	mimeType := resp.Header.Get("Content-Type")
+	return body, mimeType, nil
+}
+
+// UploadRawFile uploads raw bytes to a Drive folder as a new file.
+// mimeType is the content type (e.g. "image/svg+xml", "text/plain").
+// Returns the resulting DriveFile (id, name, webViewLink).
+func (c *Client) UploadRawFile(ctx context.Context, content []byte, filename, mimeType, folderID string) (*DriveFile, error) {
+	const boundary = "cbw_raw_upload"
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.SetBoundary(boundary)
+
+	// Metadata part.
+	metaHeader := make(textproto.MIMEHeader)
+	metaHeader.Set("Content-Type", "application/json; charset=UTF-8")
+	metaPart, err := mw.CreatePart(metaHeader)
+	if err != nil {
+		return nil, err
+	}
+	metaPayload := map[string]any{
+		"name":     filename,
+		"mimeType": mimeType,
+		"parents":  []string{folderID},
+	}
+	if err := json.NewEncoder(metaPart).Encode(metaPayload); err != nil {
+		return nil, err
+	}
+
+	// Content part.
+	contentHeader := make(textproto.MIMEHeader)
+	contentHeader.Set("Content-Type", mimeType)
+	contentPart, err := mw.CreatePart(contentHeader)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := contentPart.Write(content); err != nil {
+		return nil, err
+	}
+	mw.Close()
+
+	uploadURL := "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink"
+	tok, err := c.tm.GetAccessToken()
+	if err != nil {
+		return nil, fmt.Errorf("get access token: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, &buf)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "multipart/related; boundary="+boundary)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("upload file: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		preview := string(respBody)
+		if len(preview) > 400 {
+			preview = preview[:400]
+		}
+		return nil, fmt.Errorf("upload file: HTTP %d: %s", resp.StatusCode, preview)
+	}
+
+	var result struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		WebViewLink string `json:"webViewLink"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parse upload response: %w", err)
+	}
+	return &DriveFile{
+		ID:          result.ID,
+		Name:        result.Name,
+		MimeType:    mimeType,
+		WebViewLink: result.WebViewLink,
+	}, nil
 }
 
 // doRequest performs an authenticated HTTP request and returns the response body.

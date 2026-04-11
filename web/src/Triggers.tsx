@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
+import Nav from './Nav'
 
 interface Trigger {
   id: string
   name: string
-  type: 'webhook' | 'record_hook' | 'cron'
+  type: 'webhook' | 'record_hook' | 'cron' | 'telegram' | 'telegram_callback'
   graph_name: string
   config: Record<string, string>
   token: string
@@ -18,6 +19,8 @@ const TYPE_COLORS: Record<string, { bg: string; color: string }> = {
   webhook:     { bg: '#e8f4fd', color: '#2980b9' },
   record_hook: { bg: '#fef9e7', color: '#e67e22' },
   cron:        { bg: '#eafaf1', color: '#1e8449' },
+  telegram:          { bg: '#e8f1fd', color: '#2563eb' },
+  telegram_callback: { bg: '#ede9fe', color: '#7c3aed' },
 }
 
 function TypeBadge({ type }: { type: string }) {
@@ -118,7 +121,14 @@ export default function Triggers() {
   const copyWebhookUrl = (token: string, id: string) => {
     const url = `${window.location.origin}/webhooks/${token}`
     navigator.clipboard.writeText(url)
-    setCopiedId(id)
+    setCopiedId(id + '_token')
+    setTimeout(() => setCopiedId(null), 2000)
+  }
+
+  const copyTriggerUrl = (id: string) => {
+    const url = `${window.location.origin}/trigger/${id}`
+    navigator.clipboard.writeText(url)
+    setCopiedId(id + '_trigger')
     setTimeout(() => setCopiedId(null), 2000)
   }
 
@@ -142,15 +152,13 @@ export default function Triggers() {
   }
 
   return (
-    <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ flex: 1, overflow: 'auto', background: '#f5f7fa' }}>
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <h1 style={{ fontSize: '20px', color: '#667eea', fontWeight: 600, margin: 0 }}>Triggers</h1>
         <div style={{ display: 'flex', gap: '10px' }}>
           <button onClick={openCreate} style={navBtn('#27ae60')}>+ New Trigger</button>
-          <button onClick={() => navigate('/workflows')} style={navBtn('#667eea')}>Workflows</button>
-          <button onClick={() => navigate('/settings')} style={navBtn('#6b46c1')}>Settings</button>
-          <a href="/logs" style={navBtn('#667eea')}>Logs</a>
-          <a href="/logout" style={navBtn('#e74c3c')}>Logout</a>
         </div>
       </header>
 
@@ -178,18 +186,42 @@ export default function Triggers() {
                     <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed' }}><TypeBadge type={t.type} /></td>
                     <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '13px', color: '#667eea', fontFamily: 'monospace' }}>{t.graph_name}</td>
                     <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '12px', color: '#555' }}>
-                      {t.type === 'webhook' && (
-                        <button onClick={() => copyWebhookUrl(t.token, t.id)}
-                          style={{ background: copiedId === t.id ? '#27ae60' : '#f0f0f0', color: copiedId === t.id ? 'white' : '#333', border: 'none', borderRadius: '4px', padding: '3px 10px', cursor: 'pointer', fontSize: '12px' }}>
-                          {copiedId === t.id ? 'Copied!' : 'Copy URL'}
-                        </button>
-                      )}
-                      {t.type === 'record_hook' && (
-                        <span style={{ fontFamily: 'monospace' }}>{t.config.collection} / {t.config.event}</span>
-                      )}
-                      {t.type === 'cron' && (
-                        <span style={{ fontFamily: 'monospace' }}>every {t.config.interval}</span>
-                      )}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        {/* Trigger ID URL — works for all types */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <code style={{ fontSize: '11px', color: '#475569', background: '#f1f5f9', padding: '2px 6px', borderRadius: '3px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '180px' }}>
+                            /trigger/{t.id}
+                          </code>
+                          <button onClick={() => copyTriggerUrl(t.id)}
+                            style={{ background: copiedId === t.id + '_trigger' ? '#27ae60' : '#e8f4fd', color: copiedId === t.id + '_trigger' ? 'white' : '#2980b9', border: 'none', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px', fontWeight: 600, whiteSpace: 'nowrap' }}>
+                            {copiedId === t.id + '_trigger' ? 'Copied!' : 'Copy'}
+                          </button>
+                        </div>
+                        {/* Type-specific config info */}
+                        {t.type === 'webhook' && t.token && (
+                          <button onClick={() => copyWebhookUrl(t.token, t.id)}
+                            style={{ alignSelf: 'flex-start', background: copiedId === t.id + '_token' ? '#27ae60' : '#f0f0f0', color: copiedId === t.id + '_token' ? 'white' : '#333', border: 'none', borderRadius: '4px', padding: '2px 8px', cursor: 'pointer', fontSize: '11px' }}>
+                            {copiedId === t.id + '_token' ? 'Copied!' : 'Copy token URL'}
+                          </button>
+                        )}
+                        {t.type === 'record_hook' && (
+                          <span style={{ fontFamily: 'monospace', fontSize: '11px', color: '#888' }}>{t.config.collection} / {t.config.event}</span>
+                        )}
+                        {t.type === 'cron' && (
+                          <span style={{ fontFamily: 'monospace', fontSize: '11px', color: '#888' }}>every {t.config.interval}</span>
+                        )}
+                        {t.type === 'telegram' && (
+                          <span style={{ fontFamily: 'monospace', fontSize: '11px', color: '#888' }}>
+                            {[
+                              t.config.chat_type && t.config.chat_type,
+                              t.config.chat_id && `id:${t.config.chat_id}`,
+                              t.config.username && `@${t.config.username}`,
+                              t.config.text_contains && `contains:"${t.config.text_contains}"`,
+                              t.config.text_starts_with && `starts:"${t.config.text_starts_with}"`,
+                            ].filter(Boolean).join(', ') || 'any message'}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed', fontSize: '12px', color: '#888' }}>{formatDate(t.last_fired)}</td>
                     <td style={{ padding: '12px 16px', borderBottom: '1px solid #e0e6ed' }}>
@@ -229,6 +261,8 @@ export default function Triggers() {
                   <option value="webhook">Webhook — POST to a secret URL</option>
                   <option value="record_hook">Record Hook — PocketBase collection event</option>
                   <option value="cron">Cron — interval timer</option>
+                  <option value="telegram">Telegram — incoming message</option>
+                  <option value="telegram_callback">Telegram — button callback</option>
                 </select>
               </Field>
 
@@ -271,6 +305,59 @@ export default function Triggers() {
                 </Field>
               )}
 
+              {modal.trigger.type === 'telegram_callback' && (
+                <>
+                  <div style={{ padding: '8px 12px', background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '6px', fontSize: '12px', color: '#5b21b6' }}>
+                    Fires when a user clicks an inline button sent by <strong>telegram_send_button</strong>. Filter by callback_data to route different buttons to different workflows.
+                  </div>
+                  <Field label="Callback data equals">
+                    <input value={modal.trigger.config?.callback_data ?? ''} onChange={e => patchConfig('callback_data', e.target.value)}
+                      placeholder='e.g. "yes" or "approve_order"' style={inputStyle} />
+                  </Field>
+                  <Field label="Callback data starts with">
+                    <input value={modal.trigger.config?.callback_data_prefix ?? ''} onChange={e => patchConfig('callback_data_prefix', e.target.value)}
+                      placeholder='e.g. "action_"' style={inputStyle} />
+                  </Field>
+                  <Field label="Chat ID">
+                    <input type="number" value={modal.trigger.config?.chat_id ?? ''} onChange={e => patchConfig('chat_id', e.target.value)}
+                      placeholder="e.g. -100123456" style={inputStyle} />
+                  </Field>
+                </>
+              )}
+
+              {modal.trigger.type === 'telegram' && (
+                <>
+                  <div style={{ padding: '8px 12px', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '6px', fontSize: '12px', color: '#1e40af' }}>
+                    All filled fields must match (AND logic). Leave blank to match any message.
+                  </div>
+                  <Field label="Text contains">
+                    <input value={modal.trigger.config?.text_contains ?? ''} onChange={e => patchConfig('text_contains', e.target.value)}
+                      placeholder='e.g. "order"' style={inputStyle} />
+                  </Field>
+                  <Field label="Text starts with">
+                    <input value={modal.trigger.config?.text_starts_with ?? ''} onChange={e => patchConfig('text_starts_with', e.target.value)}
+                      placeholder='e.g. "/status"' style={inputStyle} />
+                  </Field>
+                  <Field label="Chat ID">
+                    <input type="number" value={modal.trigger.config?.chat_id ?? ''} onChange={e => patchConfig('chat_id', e.target.value)}
+                      placeholder="e.g. -100123456" style={inputStyle} />
+                  </Field>
+                  <Field label="Chat type">
+                    <select value={modal.trigger.config?.chat_type ?? ''} onChange={e => patchConfig('chat_type', e.target.value)} style={inputStyle}>
+                      <option value="">any</option>
+                      <option value="private">private</option>
+                      <option value="group">group</option>
+                      <option value="supergroup">supergroup</option>
+                      <option value="channel">channel</option>
+                    </select>
+                  </Field>
+                  <Field label="From username">
+                    <input value={modal.trigger.config?.username ?? ''} onChange={e => patchConfig('username', e.target.value)}
+                      placeholder="e.g. john_doe (no @)" style={inputStyle} />
+                  </Field>
+                </>
+              )}
+
               <Field label="Initial Context (JSON)">
                 <textarea
                   defaultValue={getInitialContextStr()}
@@ -299,6 +386,7 @@ export default function Triggers() {
           </div>
         </div>
       )}
+      </div>
     </div>
   )
 }

@@ -72,7 +72,7 @@ func TestGdriveFillTemplateWorkflow(t *testing.T) {
 	eng := workflow.NewEngine(pbstore.New(pb), workflow.EngineConfig{Logger: logger})
 
 	// Register all workflow activities (including gdrive_fill_template)
-	if err := workflows.RegisterDefaults(eng, pb, nil, func() *google.Client { return gc }); err != nil {
+	if err := workflows.RegisterDefaults(eng, pb, nil, func() *google.Client { return gc }, nil, nil); err != nil {
 		t.Fatalf("failed to register workflow activities: %v", err)
 	}
 

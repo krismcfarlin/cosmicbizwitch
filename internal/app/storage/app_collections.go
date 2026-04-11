@@ -235,6 +235,8 @@ func seedAppSettings(app core.App, logger *log.Logger) error {
 		{"OPENROUTER_API_KEY", "OpenRouter API Key", "API key from openrouter.ai — enables access to many models via one key", true, ""},
 		{"ANTHROPIC_API_KEY", "Anthropic API Key", "API key from console.anthropic.com — for direct Anthropic API access", true, ""},
 		{"OPENAI_API_KEY", "OpenAI API Key", "API key from platform.openai.com — for direct OpenAI API access", true, ""},
+		{"GOOGLE_CLIENT_ID", "Google OAuth Client ID", "Client ID from Google Cloud Console — OAuth 2.0 credentials", false, ""},
+		{"GOOGLE_CLIENT_SECRET", "Google OAuth Client Secret", "Client secret from Google Cloud Console — OAuth 2.0 credentials", true, ""},
 		{"GOOGLE_REFRESH_TOKEN", "Google OAuth Refresh Token", "Obtained via /api/google/auth/start — do not set manually", true, ""},
 	}
 

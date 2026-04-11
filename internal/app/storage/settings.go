@@ -3,10 +3,13 @@ package storage
 import (
 	"fmt"
 	"log"
+	"os"
 	"sync"
 
 	"cosmicbizwitch/internal/app/clickfunnels"
 	googleapp "cosmicbizwitch/internal/app/google"
+	slackapp "cosmicbizwitch/internal/app/slack"
+	telegramapp "cosmicbizwitch/internal/app/telegram"
 
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
@@ -19,15 +22,18 @@ type Setting struct {
 	Label       string `json:"label"`
 	Description string `json:"description"`
 	IsSecret    bool   `json:"is_secret"`
+	IsSet       bool   `json:"is_set"`
 }
 
 // SettingsManager manages application settings backed by the app_settings PocketBase collection.
 // It holds cached API clients rebuilt whenever settings are reloaded.
 type SettingsManager struct {
-	app          core.App
-	mu           sync.RWMutex
-	cfClient     *clickfunnels.Client
-	googleClient *googleapp.Client
+	app            core.App
+	mu             sync.RWMutex
+	cfClient       *clickfunnels.Client
+	googleClient   *googleapp.Client
+	slackClient    *slackapp.Client
+	telegramClient *telegramapp.Client
 }
 
 // NewSettingsManager creates a new SettingsManager backed by the given PocketBase app.
@@ -58,13 +64,19 @@ func (m *SettingsManager) Reload(logger *log.Logger) error {
 		}
 	}
 
-	// Google Drive / Docs client
+	// Google Drive / Docs client — client ID/secret fall back to env then hardcoded defaults
 	clientID := m.Get("GOOGLE_CLIENT_ID")
+	if clientID == "" {
+		clientID = os.Getenv("GOOGLE_CLIENT_ID")
+	}
 	clientSecret := m.Get("GOOGLE_CLIENT_SECRET")
+	if clientSecret == "" {
+		clientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
+	}
 	refreshToken := m.Get("GOOGLE_REFRESH_TOKEN")
 
 	var gc *googleapp.Client
-	if clientID != "" && clientSecret != "" && refreshToken != "" {
+	if refreshToken != "" {
 		tm := googleapp.NewTokenManager(clientID, clientSecret, refreshToken)
 		gc = googleapp.NewClient(tm)
 		if logger != nil {
@@ -76,9 +88,39 @@ func (m *SettingsManager) Reload(logger *log.Logger) error {
 		}
 	}
 
+	// Slack client
+	slackBotToken := m.Get("SLACK_BOT_TOKEN")
+	var sc *slackapp.Client
+	if slackBotToken != "" {
+		sc = slackapp.NewClient(slackBotToken)
+		if logger != nil {
+			logger.Println("Slack client configured from app_settings")
+		}
+	} else {
+		if logger != nil {
+			logger.Println("SLACK_BOT_TOKEN not set in app_settings — Slack client disabled")
+		}
+	}
+
+	// Telegram client
+	telegramBotToken := m.Get("TELEGRAM_BOT_TOKEN")
+	var tc *telegramapp.Client
+	if telegramBotToken != "" {
+		tc = telegramapp.NewClient(telegramBotToken)
+		if logger != nil {
+			logger.Println("Telegram client configured from app_settings")
+		}
+	} else {
+		if logger != nil {
+			logger.Println("TELEGRAM_BOT_TOKEN not set in app_settings — Telegram client disabled")
+		}
+	}
+
 	m.mu.Lock()
 	m.cfClient = cf
 	m.googleClient = gc
+	m.slackClient = sc
+	m.telegramClient = tc
 	m.mu.Unlock()
 	return nil
 }
@@ -99,6 +141,22 @@ func (m *SettingsManager) GoogleClient() *googleapp.Client {
 	return m.googleClient
 }
 
+// SlackClient returns the current Slack bot client in a thread-safe manner.
+// Returns nil if SLACK_BOT_TOKEN is not configured.
+func (m *SettingsManager) SlackClient() *slackapp.Client {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.slackClient
+}
+
+// TelegramClient returns the current Telegram bot client in a thread-safe manner.
+// Returns nil if TELEGRAM_BOT_TOKEN is not configured.
+func (m *SettingsManager) TelegramClient() *telegramapp.Client {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.telegramClient
+}
+
 // Get retrieves a setting value from PocketBase by key.
 // Returns empty string if the key does not exist.
 func (m *SettingsManager) Get(key string) string {
@@ -116,7 +174,20 @@ func (m *SettingsManager) Set(key, value string) error {
 		return fmt.Errorf("settings Set: find %q: %w", key, err)
 	}
 	if len(records) == 0 {
-		return fmt.Errorf("settings Set: key %q not found", key)
+		col, err := m.app.FindCollectionByNameOrId("app_settings")
+		if err != nil {
+			return fmt.Errorf("settings Set: find collection: %w", err)
+		}
+		rec := core.NewRecord(col)
+		rec.Set("key", key)
+		rec.Set("label", key)
+		rec.Set("description", "")
+		rec.Set("is_secret", false)
+		rec.Set("value", value)
+		if err := m.app.Save(rec); err != nil {
+			return fmt.Errorf("settings Set: create %q: %w", key, err)
+		}
+		return nil
 	}
 	rec := records[0]
 	rec.Set("value", value)
@@ -136,6 +207,7 @@ func (m *SettingsManager) All() ([]Setting, error) {
 	for _, rec := range records {
 		isSecret := rec.GetBool("is_secret")
 		val := rec.GetString("value")
+		isSet := val != ""
 		if isSecret {
 			val = ""
 		}
@@ -145,6 +217,7 @@ func (m *SettingsManager) All() ([]Setting, error) {
 			Label:       rec.GetString("label"),
 			Description: rec.GetString("description"),
 			IsSecret:    isSecret,
+			IsSet:       isSet,
 		})
 	}
 	return out, nil

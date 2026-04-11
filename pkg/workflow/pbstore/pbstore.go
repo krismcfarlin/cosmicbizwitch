@@ -294,6 +294,7 @@ func setWorkflowFields(rec *core.Record, wf *workflow.Workflow) {
 	rec.Set("status", string(wf.Status))
 	rec.Set("current_node", wf.CurrentNode)
 	rec.Set("context", wf.Context)
+	rec.Set("initial_context", wf.InitialContext)
 
 	if wf.NotBefore != nil {
 		rec.Set("not_before", wf.NotBefore.UTC().Format(timeFmt))
@@ -317,10 +318,11 @@ func recordToWorkflow(rec *core.Record) *workflow.Workflow {
 		ID:          rec.Id,
 		Name:        rec.GetString("name"),
 		GraphName:   rec.GetString("graph_name"),
-		Status:      workflow.Status(rec.GetString("status")),
-		CurrentNode: rec.GetString("current_node"),
-		Context:     getJSONMap(rec, "context"),
-		CreatedAt:   parseTime(rec.GetString("created")),
+		Status:         workflow.Status(rec.GetString("status")),
+		CurrentNode:    rec.GetString("current_node"),
+		Context:        getJSONMap(rec, "context"),
+		InitialContext: getJSONMap(rec, "initial_context"),
+		CreatedAt:      parseTime(rec.GetString("created")),
 		UpdatedAt:   parseTime(rec.GetString("updated")),
 	}
 	if t := rec.GetString("not_before"); t != "" {

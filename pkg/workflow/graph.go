@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -101,8 +102,48 @@ func matchAll(conditions []Condition, output map[string]any) bool {
 	return true
 }
 
+// lookupPath resolves a condition key against the output map.
+// Keys may be bare ("foo"), dot-paths ("a.b.c"), or template-wrapped ("{{a.b.c}}").
+// Returns the value and whether it was found (non-nil).
+func lookupPath(key string, output map[string]any) (any, bool) {
+	// Strip {{ }} wrapper if present.
+	key = strings.TrimSpace(key)
+	if strings.HasPrefix(key, "{{") && strings.HasSuffix(key, "}}") {
+		key = strings.TrimSpace(key[2 : len(key)-2])
+	}
+	// Flat lookup first.
+	if v, ok := output[key]; ok {
+		return v, v != nil
+	}
+	// Dot-path walk.
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return nil, false
+	}
+	var cur any = map[string]any(output)
+	for _, p := range parts {
+		switch v := cur.(type) {
+		case map[string]any:
+			val, ok := v[p]
+			if !ok {
+				return nil, false
+			}
+			cur = val
+		case []any:
+			i, err := strconv.Atoi(p)
+			if err != nil || i < 0 || i >= len(v) {
+				return nil, false
+			}
+			cur = v[i]
+		default:
+			return nil, false
+		}
+	}
+	return cur, cur != nil
+}
+
 func evalCondition(c Condition, output map[string]any) bool {
-	raw, exists := output[c.Key]
+	raw, exists := lookupPath(c.Key, output)
 
 	switch c.Operator {
 	case "exists":
@@ -160,6 +201,10 @@ func toFloat64(v any) (float64, bool) {
 		return float64(n), true
 	case int32:
 		return float64(n), true
+	case string:
+		if f, err := strconv.ParseFloat(n, 64); err == nil {
+			return f, true
+		}
 	}
 	return 0, false
 }

@@ -2,12 +2,22 @@ package workflows
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"regexp"
+	"strings"
+	"time"
 
 	googleapp "cosmicbizwitch/internal/app/google"
 	"cosmicbizwitch/pkg/workflow"
 )
+
+// googleDocIDRe extracts the document ID from a Google Docs URL.
+var googleDocIDRe = regexp.MustCompile(`/document/d/([a-zA-Z0-9_-]+)`)
 
 // registerGoogleActivities registers all Google Drive and Docs activity nodes.
 func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.Client) {
@@ -279,7 +289,16 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			}
 			docID := gdriveString(input, "doc_id")
 			if docID == "" {
-				return nil, fmt.Errorf("convert_to_pdf: doc_id is required")
+				// Accept a full Google Docs URL and extract the doc ID from it.
+				if u := gdriveString(input, "doc_url"); u != "" {
+					// URL form: https://docs.google.com/document/d/{ID}/...
+					if m := googleDocIDRe.FindStringSubmatch(u); len(m) > 1 {
+						docID = m[1]
+					}
+				}
+			}
+			if docID == "" {
+				return nil, fmt.Errorf("convert_to_pdf: doc_id or doc_url is required")
 			}
 			folderID := gdriveString(input, "folder_id")
 			if folderID == "" {
@@ -295,12 +314,21 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 				filename = f.Name + ".pdf"
 			}
 
+			visibility := gdriveString(input, "visibility")
+
 			fmt.Printf("[convert_to_pdf] Converting doc %s to PDF\n", docID)
 			pdf, err := gc.ExportAndSavePDF(ctx, docID, folderID, filename)
 			if err != nil {
 				return nil, fmt.Errorf("convert_to_pdf: %w", err)
 			}
 			fmt.Printf("[convert_to_pdf] PDF saved: %s\n", pdf.Name)
+
+			if visibility == "public" {
+				if err := gc.MakePublic(ctx, pdf.ID); err != nil {
+					return nil, fmt.Errorf("convert_to_pdf: make public: %w", err)
+				}
+			}
+
 			return map[string]any{
 				"pdf_id":       pdf.ID,
 				"pdf_url":      pdf.WebViewLink,
@@ -311,9 +339,11 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			Category:    "Google Workspace",
 			Description: "Converts a Google Doc to PDF and saves it to a Drive folder.",
 			InputFields: []workflow.FieldMeta{
-				{Name: "doc_id", Type: "string", Required: true, Description: "ID of the Google Doc to convert. Pipe in {{doc_id}} from earlier steps."},
+				{Name: "doc_id", Type: "string", Description: "ID of the Google Doc to convert. Use this OR doc_url — one is required."},
+				{Name: "doc_url", Type: "string", Description: "Full Google Docs URL (e.g. {{doc_url}} from gdrive_fill_template). The doc ID is extracted automatically."},
 				{Name: "folder_id", Type: "gdrive_folder", Required: true, Description: "Drive folder to save the PDF into — use Browse to pick."},
 				{Name: "filename", Type: "string", Description: "PDF filename. Supports {{key}} interpolation. Defaults to document title + \".pdf\"."},
+				{Name: "visibility", Type: "string", Options: []string{"private", "public"}, Description: "Set to 'public' to make the PDF accessible to anyone with the link. Defaults to private."},
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "pdf_id", Type: "string", Description: "Drive ID of the saved PDF."},
@@ -391,10 +421,24 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			if err != nil {
 				return nil, fmt.Errorf("gdrive_create_doc: %w", err)
 			}
-			return map[string]any{
+			out := map[string]any{
 				"doc_id":  f.ID,
 				"doc_url": f.WebViewLink,
-			}, nil
+			}
+			makePublic, _ := input["make_public"].(bool)
+			if !makePublic {
+				if s, ok := input["make_public"].(string); ok {
+					makePublic = s == "true"
+				}
+			}
+			if makePublic {
+				if err := gc.MakePublic(ctx, f.ID); err != nil {
+					log.Printf("[gdrive_create_doc] make public failed: %v", err)
+				} else {
+					out["public_url"] = "https://drive.google.com/uc?id=" + f.ID
+				}
+			}
+			return out, nil
 		},
 		workflow.ActivityMeta{
 			Category:    "Google Workspace",
@@ -403,10 +447,264 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 				{Name: "folder_id", Type: "gdrive_folder", Required: true, Description: "Drive folder to create the document in — use Browse to pick."},
 				{Name: "title", Type: "string", Required: true, Description: "Document title. Supports {{key}} interpolation."},
 				{Name: "content", Type: "string", Description: "Text content for the document. Use {{var_name}} to pull from a context variable (e.g. {{filled_content}})."},
+				{Name: "make_public", Type: "boolean", Description: "If true, grants anyone-with-link read access and returns a public_url."},
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "doc_id", Type: "string", Description: "Drive ID of the created document."},
 				{Name: "doc_url", Type: "string", Description: "Web view URL of the created document."},
+				{Name: "public_url", Type: "string", Description: "Direct public URL (only set when make_public is true)."},
+			},
+		},
+	)
+
+	// ── gdrive_save_file ─────────────────────────────────────────────────────
+
+	eng.RegisterActivityWithMeta("gdrive_save_file",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			gc := getGoogle()
+			if gc == nil {
+				return map[string]any{"error": "Google Drive not configured — add credentials in Settings"}, nil
+			}
+			folderID := gdriveString(input, "folder_id")
+			if folderID == "" {
+				return nil, fmt.Errorf("gdrive_save_file: folder_id is required")
+			}
+			filename := gdriveString(input, "filename")
+			if filename == "" {
+				return nil, fmt.Errorf("gdrive_save_file: filename is required")
+			}
+			content := gdriveString(input, "content")
+			if content == "" {
+				return nil, fmt.Errorf("gdrive_save_file: content is required")
+			}
+			mimeType := gdriveString(input, "mime_type")
+			if mimeType == "" {
+				mimeType = "text/plain"
+			}
+
+			// Decode base64 if explicitly requested via content_encoding field.
+			contentBytes := []byte(content)
+			if enc := gdriveString(input, "content_encoding"); enc == "base64" {
+				if decoded, err := base64.StdEncoding.DecodeString(content); err == nil {
+					contentBytes = decoded
+				}
+			}
+
+			f, err := gc.UploadRawFile(ctx, contentBytes, filename, mimeType, folderID)
+			if err != nil {
+				return nil, fmt.Errorf("gdrive_save_file: %w", err)
+			}
+			out := map[string]any{
+				"file_id":   f.ID,
+				"file_url":  f.WebViewLink,
+				"filename":  f.Name,
+				"mime_type": mimeType,
+			}
+			makePublic, _ := input["make_public"].(bool)
+			if !makePublic {
+				if s, ok := input["make_public"].(string); ok {
+					makePublic = s == "true"
+				}
+			}
+			if makePublic {
+				if err := gc.MakePublic(ctx, f.ID); err != nil {
+					log.Printf("[gdrive_save_file] make public failed: %v", err)
+				} else {
+					out["public_url"] = "https://drive.google.com/uc?id=" + f.ID
+				}
+			}
+			return out, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "Google Workspace",
+			Description: "Saves raw content (text, SVG, HTML, etc.) as a file in a Google Drive folder. Use after http_request to store the response body.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "folder_id", Type: "gdrive_folder", Required: true, Description: "Drive folder to save the file in — use Browse to pick."},
+				{Name: "filename", Type: "string", Required: true, Description: "Name of the file including extension, e.g. chart.svg"},
+				{Name: "content", Type: "string", Required: true, Description: "File content — use {{body}} to pass the http_request response body."},
+				{Name: "content_encoding", Type: "string", Description: "Set to 'base64' when content is a binary http_request response (images, PDFs). Leave blank for text.", Options: []string{"", "base64"}},
+				{Name: "mime_type", Type: "string", Required: false, Description: "MIME type of the file. Defaults to text/plain.", Options: []string{
+					"image/svg+xml",
+					"text/html",
+					"text/plain",
+					"text/csv",
+					"text/markdown",
+					"application/json",
+					"application/xml",
+					"application/pdf",
+					"image/png",
+					"image/jpeg",
+				}},
+				{Name: "make_public", Type: "boolean", Description: "If true, grants anyone-with-link read access and returns a public_url."},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "file_id", Type: "string", Description: "Drive ID of the uploaded file."},
+				{Name: "file_url", Type: "string", Description: "Web view URL of the uploaded file."},
+				{Name: "filename", Type: "string", Description: "Filename as saved."},
+				{Name: "public_url", Type: "string", Description: "Direct public URL (only set when make_public is true)."},
+			},
+		},
+	)
+
+	// ── gdrive_fetch_url ──────────────────────────────────────────────────────
+	// Fetches a URL as raw bytes and saves directly to Drive — no string
+	// conversion, so binary files (PNG, JPEG, PDF) are never corrupted.
+
+	eng.RegisterActivityWithMeta("gdrive_fetch_url",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			gc := getGoogle()
+			if gc == nil {
+				return map[string]any{"error": "Google Drive not configured — add credentials in Settings"}, nil
+			}
+
+			rawURL := gdriveString(input, "url")
+			if rawURL == "" {
+				return nil, fmt.Errorf("gdrive_fetch_url: url is required")
+			}
+			folderID := gdriveString(input, "folder_id")
+			if folderID == "" {
+				return nil, fmt.Errorf("gdrive_fetch_url: folder_id is required")
+			}
+			filename := gdriveString(input, "filename")
+			mimeType := gdriveString(input, "mime_type")
+
+			method := strings.ToUpper(gdriveString(input, "method"))
+			if method == "" {
+				method = "GET"
+			}
+
+			rawURL = interpolateTemplate(rawURL, input)
+
+			// Build request body.
+			var bodyReader io.Reader
+			if bodyVal, ok := input["body"]; ok && bodyVal != nil {
+				var bodyStr string
+				switch v := bodyVal.(type) {
+				case string:
+					bodyStr = interpolateTemplate(v, input)
+				default:
+					if b, err := json.Marshal(v); err == nil {
+						bodyStr = string(b)
+					}
+				}
+				if bodyStr != "" {
+					bodyReader = strings.NewReader(bodyStr)
+				}
+			}
+
+			timeout := 60 * time.Second
+			if t, _ := input["timeout_seconds"].(float64); t > 0 {
+				timeout = time.Duration(t) * time.Second
+			}
+
+			client := &http.Client{Timeout: timeout}
+			req, err := http.NewRequestWithContext(ctx, method, rawURL, bodyReader)
+			if err != nil {
+				return nil, fmt.Errorf("gdrive_fetch_url: build request: %w", err)
+			}
+			if bodyReader != nil {
+				req.Header.Set("Content-Type", "application/json")
+			}
+
+			// Apply custom headers.
+			var headersMap map[string]any
+			if m, ok := input["headers"].(map[string]any); ok {
+				headersMap = m
+			} else if s, ok := input["headers"].(string); ok && s != "" {
+				_ = json.Unmarshal([]byte(s), &headersMap)
+			}
+			for k, v := range headersMap {
+				req.Header.Set(k, interpolateTemplate(fmt.Sprintf("%v", v), input))
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				return nil, fmt.Errorf("gdrive_fetch_url: fetch %s: %w", rawURL, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return nil, fmt.Errorf("gdrive_fetch_url: HTTP %d from %s", resp.StatusCode, rawURL)
+			}
+
+			data, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("gdrive_fetch_url: read body: %w", err)
+			}
+
+			// Infer mime type from Content-Type if not provided.
+			if mimeType == "" {
+				mimeType = resp.Header.Get("Content-Type")
+				if mimeType == "" {
+					mimeType = "application/octet-stream"
+				}
+			}
+
+			// Default filename from URL if not provided.
+			if filename == "" {
+				parts := strings.Split(strings.TrimRight(rawURL, "/"), "/")
+				filename = parts[len(parts)-1]
+				if filename == "" {
+					filename = "file"
+				}
+			}
+
+			log.Printf("[gdrive_fetch_url] fetched %d bytes (%s) → saving as %s", len(data), mimeType, filename)
+
+			f, err := gc.UploadRawFile(ctx, data, filename, mimeType, folderID)
+			if err != nil {
+				return nil, fmt.Errorf("gdrive_fetch_url: upload: %w", err)
+			}
+
+			out := map[string]any{
+				"file_id":   f.ID,
+				"file_url":  f.WebViewLink,
+				"filename":  f.Name,
+				"mime_type": mimeType,
+			}
+
+			makePublic, _ := input["make_public"].(bool)
+			if !makePublic {
+				if s, ok := input["make_public"].(string); ok {
+					makePublic = s == "true"
+				}
+			}
+			if makePublic {
+				if err := gc.MakePublic(ctx, f.ID); err != nil {
+					log.Printf("[gdrive_fetch_url] make public failed: %v", err)
+				} else {
+					out["public_url"] = "https://drive.google.com/uc?id=" + f.ID
+				}
+			}
+
+			return out, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "Google Workspace",
+			Description: "Fetches a URL as raw bytes and saves directly to Google Drive. Use this instead of http_request + gdrive_save_file for binary files (PNG, JPEG, PDF) to avoid corruption.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "url", Type: "string", Required: true, Description: "URL to fetch. Supports {{key}} interpolation."},
+				{Name: "method", Type: "string", Description: "HTTP method. Defaults to GET.", Options: []string{"GET", "POST", "PUT", "PATCH", "DELETE"}},
+				{Name: "headers", Type: "object", Description: `Request headers as JSON, e.g. {"Authorization": "Bearer {{token}}"}.`},
+				{Name: "body", Type: "textarea", Description: "Request body (for POST/PUT). Supports {{key}} interpolation."},
+				{Name: "folder_id", Type: "gdrive_folder", Required: true, Description: "Drive folder to save into — use Browse to pick."},
+				{Name: "filename", Type: "string", Description: "Filename to save as (e.g. chart.png). Defaults to last segment of the URL."},
+				{Name: "mime_type", Type: "string", Description: "MIME type override. Defaults to Content-Type from the server response.", Options: []string{
+					"image/png",
+					"image/jpeg",
+					"image/svg+xml",
+					"image/gif",
+					"image/webp",
+					"application/pdf",
+					"application/octet-stream",
+				}},
+				{Name: "make_public", Type: "boolean", Description: "If true, grants anyone-with-link read access and returns a public_url."},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "file_id", Type: "string", Description: "Drive ID of the saved file."},
+				{Name: "file_url", Type: "string", Description: "Web view URL of the saved file."},
+				{Name: "filename", Type: "string", Description: "Filename as saved."},
+				{Name: "mime_type", Type: "string", Description: "MIME type used."},
+				{Name: "public_url", Type: "string", Description: "Direct public URL (only set when make_public is true)."},
 			},
 		},
 	)

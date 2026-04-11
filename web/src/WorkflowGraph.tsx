@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useCallback } from 'react'
 import type { ActivityGraph, ActivityInstance, ActivityStatus } from './types'
 
 const STATUS_FILL: Record<ActivityStatus | 'default', string> = {
@@ -77,6 +77,16 @@ interface Props {
 
 export default function WorkflowGraph({ graph, activities, currentNode }: Props) {
   const [tooltip, setTooltip] = useState<TooltipState | null>(null)
+  const [pinned, setPinned] = useState<ActivityInstance | null>(null)
+  const [copiedPin, setCopiedPin] = useState(false)
+
+  const copyPinnedInput = useCallback(() => {
+    if (!pinned?.input) return
+    navigator.clipboard.writeText(JSON.stringify(pinned.input, null, 2)).then(() => {
+      setCopiedPin(true)
+      setTimeout(() => setCopiedPin(false), 1500)
+    })
+  }, [pinned])
 
   const positions = layoutGraph(graph)
 
@@ -174,6 +184,7 @@ export default function WorkflowGraph({ graph, activities, currentNode }: Props)
               onMouseEnter={(e) => setTooltip({ nodeId: id, x: e.clientX, y: e.clientY })}
               onMouseMove={(e) => setTooltip(prev => prev ? { ...prev, x: e.clientX, y: e.clientY } : null)}
               onMouseLeave={() => setTooltip(null)}
+              onClick={() => { const act = activityMap.get(id); if (act) { setPinned(p => p?.node_id === id ? null : act); setCopiedPin(false) } }}
             >
               {isCurrent && (
                 <rect x={pos.x - 3} y={pos.y - 3} width={NODE_W + 6} height={NODE_H + 6}
@@ -209,7 +220,7 @@ export default function WorkflowGraph({ graph, activities, currentNode }: Props)
           pointerEvents: 'none',
           lineHeight: 1.5,
         }}>
-          <div style={{ color: '#9cdcfe', fontWeight: 700, marginBottom: '6px' }}>{tooltipAct.node_id} ({tooltipAct.status})</div>
+          <div style={{ color: '#9cdcfe', fontWeight: 700, marginBottom: '6px' }}>{tooltipAct.node_id} ({tooltipAct.status}) — click to copy input</div>
           <div style={{ color: '#4ec9b0', fontWeight: 600, marginBottom: '2px' }}>Input</div>
           <pre style={{ margin: '0 0 8px', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
             {Object.keys(tooltipAct.input ?? {}).length > 0
@@ -220,6 +231,30 @@ export default function WorkflowGraph({ graph, activities, currentNode }: Props)
           <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
             {tooltipAct.output && Object.keys(tooltipAct.output).length > 0
               ? JSON.stringify(tooltipAct.output, null, 2)
+              : '—'}
+          </pre>
+        </div>
+      )}
+
+      {/* Pinned input panel (click to open, click again to close) */}
+      {pinned && (
+        <div style={{ marginTop: '12px', background: '#1e1e1e', borderRadius: '6px', padding: '12px', fontFamily: 'monospace', fontSize: '11px', color: '#d4d4d4' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
+            <span style={{ color: '#9cdcfe', fontWeight: 700 }}>{pinned.node_id} — input</span>
+            <button
+              onClick={copyPinnedInput}
+              style={{ background: copiedPin ? '#27ae60' : '#0ea5e9', color: 'white', border: 'none', borderRadius: '4px', padding: '3px 10px', fontSize: '11px', cursor: 'pointer', fontFamily: 'monospace' }}
+            >
+              {copiedPin ? '✓ Copied' : 'Copy'}
+            </button>
+            <button
+              onClick={() => setPinned(null)}
+              style={{ marginLeft: 'auto', background: 'transparent', color: '#888', border: 'none', cursor: 'pointer', fontSize: '14px', lineHeight: 1 }}
+            >✕</button>
+          </div>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', maxHeight: '300px', overflowY: 'auto' }}>
+            {Object.keys(pinned.input ?? {}).length > 0
+              ? JSON.stringify(pinned.input, null, 2)
               : '—'}
           </pre>
         </div>

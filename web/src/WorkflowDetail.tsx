@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import type { Workflow, ActivityInstance, ActivityGraph, WorkflowStatus, ActivityStatus } from './types'
 import WorkflowGraph from './WorkflowGraph'
+import Nav from './Nav'
 
 const STATUS_COLORS: Record<WorkflowStatus | ActivityStatus, { bg: string; color: string }> = {
   pending:       { bg: '#e8f4fd', color: '#2980b9' },
@@ -24,14 +25,68 @@ function Badge({ status }: { status: string }) {
   )
 }
 
-function JsonDisplay({ data }: { data: Record<string, unknown> | undefined }) {
-  if (!data || Object.keys(data).length === 0) {
+function JsonDisplay({ data, excludeKeys }: { data: Record<string, unknown> | undefined; excludeKeys?: string[] }) {
+  const filtered = data && excludeKeys && excludeKeys.length > 0
+    ? Object.fromEntries(Object.entries(data).filter(([k]) => !excludeKeys.includes(k)))
+    : data
+  if (!filtered || Object.keys(filtered).length === 0) {
     return <span style={{ color: '#aaa', fontSize: '12px' }}>—</span>
   }
   return (
     <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: '10px 12px', borderRadius: '6px', fontSize: '11px', overflowX: 'auto', margin: 0, lineHeight: 1.6 }}>
-      {JSON.stringify(data, null, 2)}
+      {JSON.stringify(filtered, null, 2)}
     </pre>
+  )
+}
+
+function CurlModal({ curlCommand, onClose }: { curlCommand: string; onClose: () => void }) {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = useCallback(() => {
+    navigator.clipboard.writeText(curlCommand).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }, [curlCommand])
+
+  // Close on backdrop click or Escape key
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000 }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{ background: '#1e1e2e', borderRadius: '10px', padding: '20px', width: 'min(720px, 90vw)', boxShadow: '0 24px 80px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column', gap: '12px' }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{ fontFamily: 'monospace', fontSize: '12px', fontWeight: 700, color: '#89b4fa', textTransform: 'uppercase', letterSpacing: '0.5px' }}>curl command</span>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button
+              onClick={handleCopy}
+              style={{ background: copied ? '#a6e3a1' : '#313244', color: copied ? '#1e1e2e' : '#cdd6f4', border: 'none', borderRadius: '6px', padding: '5px 14px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', transition: 'background 0.15s, color 0.15s' }}
+            >
+              {copied ? 'Copied!' : 'Copy'}
+            </button>
+            <button
+              onClick={onClose}
+              style={{ background: '#313244', color: '#cdd6f4', border: 'none', borderRadius: '6px', padding: '5px 10px', fontSize: '14px', cursor: 'pointer' }}
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+        <pre style={{ background: '#181825', color: '#cdd6f4', padding: '14px 16px', borderRadius: '6px', fontSize: '12px', fontFamily: 'monospace', overflowX: 'auto', margin: 0, lineHeight: 1.7, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+          {curlCommand}
+        </pre>
+      </div>
+    </div>
   )
 }
 
@@ -186,6 +241,7 @@ export default function WorkflowDetail() {
   const [loading, setLoading] = useState(true)
   const [restarting, setRestarting] = useState(false)
   const [pyodidePanel, setPyodidePanel] = useState<{ code: string; input: Record<string, unknown>; nodeId: string } | null>(null)
+  const [curlModal, setCurlModal] = useState<string | null>(null)
 
   const load = async () => {
     const res = await fetch(`/api/workflows/${id}`)
@@ -279,7 +335,9 @@ export default function WorkflowDetail() {
   if (!workflow) return <div style={{ padding: '40px', textAlign: 'center', color: '#e74c3c' }}>Workflow not found.</div>
 
   return (
-    <div style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', minHeight: '100vh', background: '#f5f7fa' }}>
+    <div style={{ display: 'flex', height: '100vh', fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif' }}>
+      <Nav />
+      <div style={{ flex: 1, overflow: 'auto', background: '#f5f7fa' }}>
       <header style={{ background: 'white', borderBottom: '1px solid #e0e6ed', padding: '14px 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', boxShadow: '0 2px 4px rgba(0,0,0,0.05)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <button onClick={() => navigate('/workflows')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#667eea', fontSize: '18px', padding: 0 }}>←</button>
@@ -301,7 +359,6 @@ export default function WorkflowDetail() {
               {restarting ? 'Restarting...' : 'Restart'}
             </button>
           )}
-          <a href="/logout" style={{ ...btn('#95a5a6'), textDecoration: 'none' }}>Logout</a>
         </div>
       </header>
 
@@ -393,8 +450,18 @@ export default function WorkflowDetail() {
                         <JsonDisplay data={act.input} />
                       </div>
                       <div>
-                        <div style={{ fontSize: '11px', color: '#27ae60', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px' }}>Output</div>
-                        <JsonDisplay data={act.output} />
+                        <div style={{ fontSize: '11px', color: '#27ae60', fontWeight: 600, textTransform: 'uppercase', marginBottom: '8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          Output
+                          {act.output && typeof act.output['curl'] === 'string' && (
+                            <button
+                              onClick={e => { e.stopPropagation(); setCurlModal(act.output!['curl'] as string) }}
+                              style={{ background: '#313244', color: '#89b4fa', border: 'none', borderRadius: '10px', padding: '2px 10px', fontSize: '11px', fontFamily: 'monospace', fontWeight: 700, cursor: 'pointer', letterSpacing: '0.3px' }}
+                            >
+                              curl
+                            </button>
+                          )}
+                        </div>
+                        <JsonDisplay data={act.output} excludeKeys={['curl']} />
                       </div>
                     </div>
                     {act.error_msg && (
@@ -415,6 +482,11 @@ export default function WorkflowDetail() {
         </div>
       </div>
 
+      {/* Curl modal */}
+      {curlModal !== null && (
+        <CurlModal curlCommand={curlModal} onClose={() => setCurlModal(null)} />
+      )}
+
       {/* Trigger modal */}
       {triggerModal && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
@@ -434,6 +506,7 @@ export default function WorkflowDetail() {
           </div>
         </div>
       )}
+      </div>
     </div>
   )
 }

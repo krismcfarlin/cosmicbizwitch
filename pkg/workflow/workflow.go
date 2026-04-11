@@ -36,9 +36,10 @@ type Workflow struct {
 	NotBefore   *time.Time     `json:"not_before,omitempty"`
 	StartedAt   *time.Time     `json:"started_at,omitempty"`
 	FinishedAt  *time.Time     `json:"finished_at,omitempty"`
-	CurrentNode string         `json:"current_node"`
-	Context     map[string]any `json:"context"` // accumulated data across all activities
-	CreatedAt   time.Time      `json:"created_at"`
+	CurrentNode    string         `json:"current_node"`
+	Context        map[string]any `json:"context"`                   // accumulated data across all activities
+	InitialContext map[string]any `json:"initial_context,omitempty"` // snapshot of context at workflow creation
+	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt   time.Time      `json:"updated_at"`
 }
 

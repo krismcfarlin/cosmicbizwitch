@@ -22,16 +22,29 @@ set -euo pipefail
 #   - /opt/cosmicbizwitch/backups/ directory exists (created automatically)
 # ---------------------------------------------------------------------------
 
-SERVER="${DEPLOY_SERVER:-server.cosmicbizwitch.com}"
+# Always run from the project root (directory containing this script).
+cd "$(dirname "$0")"
+
+SERVER="${DEPLOY_SERVER:-159.223.157.70}"
 REMOTE_DIR="/opt/cosmicbizwitch"
 SERVICE="cosmicbizwitch"
 REMOTE_SRC="$REMOTE_DIR/src"
+
+# Use a single SSH ControlMaster socket so all connections reuse one session.
+SOCKET="/tmp/deploy-ssh-$$"
+SSH="ssh -o ControlMaster=auto -o ControlPath=$SOCKET -o ControlPersist=120"
+
+# Open the master connection once.
+$SSH -fN "root@$SERVER"
+
+cleanup() { ssh -O exit -o ControlPath="$SOCKET" "root@$SERVER" 2>/dev/null || true; }
+trap cleanup EXIT
 
 # ---------------------------------------------------------------------------
 # Step 1: Stop the service
 # ---------------------------------------------------------------------------
 echo "==> Stopping service ..."
-ssh "root@$SERVER" bash <<'ENDSSH'
+$SSH "root@$SERVER" bash <<'ENDSSH'
   set -euo pipefail
   if systemctl is-active --quiet cosmicbizwitch; then
     systemctl stop cosmicbizwitch
@@ -45,7 +58,7 @@ ENDSSH
 # Step 2: Back up data
 # ---------------------------------------------------------------------------
 echo "==> Backing up data ..."
-ssh "root@$SERVER" bash <<'ENDSSH'
+$SSH "root@$SERVER" bash <<'ENDSSH'
   set -euo pipefail
   BACKUP_DIR="/opt/cosmicbizwitch/backups"
   DATA_DIR="/opt/cosmicbizwitch/data"
@@ -70,6 +83,7 @@ ENDSSH
 # ---------------------------------------------------------------------------
 echo "==> Syncing source to $SERVER:$REMOTE_SRC ..."
 rsync -av --delete \
+  -e "ssh -o ControlMaster=auto -o ControlPath=$SOCKET -o ControlPersist=120" \
   --exclude='.git/' \
   --exclude='data/' \
   --exclude='*.db' \
@@ -84,10 +98,23 @@ rsync -av --delete \
   . "root@$SERVER:$REMOTE_SRC/"
 
 # ---------------------------------------------------------------------------
+# Step 3b: Install system dependencies
+# ---------------------------------------------------------------------------
+echo "==> Installing system dependencies ..."
+$SSH "root@$SERVER" bash <<'ENDSSH'
+  if ! command -v rsvg-convert &>/dev/null; then
+    apt-get install -y -q librsvg2-bin
+    echo "  rsvg-convert installed."
+  else
+    echo "  rsvg-convert already present: $(rsvg-convert --version 2>&1 | head -1)"
+  fi
+ENDSSH
+
+# ---------------------------------------------------------------------------
 # Step 4: Build on server
 # ---------------------------------------------------------------------------
 echo "==> Building on server (CGO, linux/amd64) ..."
-ssh "root@$SERVER" bash <<'ENDSSH'
+$SSH "root@$SERVER" bash <<'ENDSSH'
   set -euo pipefail
   export PATH=/usr/local/go/bin:$PATH
   cd /opt/cosmicbizwitch/src
@@ -105,7 +132,7 @@ ENDSSH
 # Step 5: Swap binary
 # ---------------------------------------------------------------------------
 echo "==> Swapping binary ..."
-ssh "root@$SERVER" bash <<'ENDSSH'
+$SSH "root@$SERVER" bash <<'ENDSSH'
   set -euo pipefail
   if [ -f /opt/cosmicbizwitch/cosmicbizwitch ]; then
     cp /opt/cosmicbizwitch/cosmicbizwitch /opt/cosmicbizwitch/cosmicbizwitch.prev
@@ -119,7 +146,7 @@ ENDSSH
 # Step 6: Start service
 # ---------------------------------------------------------------------------
 echo "==> Starting service ..."
-ssh "root@$SERVER" "systemctl start $SERVICE && systemctl is-active $SERVICE"
+$SSH "root@$SERVER" "systemctl start $SERVICE && systemctl is-active $SERVICE"
 
 echo ""
 echo "==> Deploy complete. https://server.cosmicbizwitch.com"

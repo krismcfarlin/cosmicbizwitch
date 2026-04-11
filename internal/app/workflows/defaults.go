@@ -4,6 +4,7 @@ package workflows
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,6 +18,8 @@ import (
 
 	"cosmicbizwitch/internal/app/clickfunnels"
 	googleapp "cosmicbizwitch/internal/app/google"
+	slackapp "cosmicbizwitch/internal/app/slack"
+	telegramapp "cosmicbizwitch/internal/app/telegram"
 	"cosmicbizwitch/pkg/workflow"
 
 	"github.com/pocketbase/dbx"
@@ -24,11 +27,18 @@ import (
 )
 
 // RegisterDefaults wires up built-in demo activities and graphs into the engine.
-func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client, getGoogle func() *googleapp.Client) error {
+func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client, getGoogle func() *googleapp.Client, getSlack func() *slackapp.Client, getTelegram func() *telegramapp.Client) error {
 	registerActivities(eng, app, getCF, log.Default())
 	registerGoogleActivities(eng, getGoogle)
+	registerImageActivities(eng, app, getGoogle)
+	registerTranscribeActivities(eng, app, getGoogle)
+	registerSlackActivities(eng, getSlack)
+	registerTelegramActivities(eng, getTelegram, app)
 	registerTemplateFill(eng)
 	registerTextSubstitute(eng)
+	registerFormatDate(eng)
+	registerRunWorkflow(eng)
+	registerAstrologyActivities(eng)
 	return registerGraphs(eng, getCF)
 }
 
@@ -69,6 +79,20 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "*", Type: "any", Description: "All keys from the parsed JSON object"},
+			},
+		},
+	)
+
+	// notes: documentation-only node, always skipped during execution.
+	eng.RegisterActivityWithMeta("notes",
+		func(_ context.Context, _ map[string]any) (map[string]any, error) {
+			return nil, workflow.ErrSkip
+		},
+		workflow.ActivityMeta{
+			Category:    "Utility",
+			Description: "Documentation node — skipped during execution",
+			InputFields: []workflow.FieldMeta{
+				{Name: "note", Type: "textarea", Description: "Free-form note for documentation purposes", Required: false},
 			},
 		},
 	)
@@ -495,12 +519,23 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 				rec = core.NewRecord(col)
 			}
 
+			fmt.Printf("[pb_upsert] setting %d data fields on record id=%q:\n", len(data), rec.Id)
 			for k, v := range data {
+				fmt.Printf("[pb_upsert]   data[%q] type=%T value=%#v\n", k, v, v)
 				rec.Set(k, v)
 			}
-			fmt.Printf("[pb_upsert] saving record id=%q contact_id=%v\n", rec.Id, rec.Get("contact_id"))
+			fmt.Printf("[pb_upsert] pre-save record fields:\n")
+			for _, f := range rec.Collection().Fields {
+				fv := rec.Get(f.GetName())
+				fmt.Printf("[pb_upsert]   field[%q] type=%T value=%#v\n", f.GetName(), fv, fv)
+			}
 			if err := app.Save(rec); err != nil {
-				return nil, fmt.Errorf("pb_upsert: save: %w", err)
+				// Build a detailed error showing all data field types/values so it appears in [APP] logs
+				details := make([]string, 0, len(data))
+				for k, v := range data {
+					details = append(details, fmt.Sprintf("%s=%T(%#v)", k, v, v))
+				}
+				return nil, fmt.Errorf("pb_upsert: save: %w | data: %s", err, strings.Join(details, ", "))
 			}
 
 			recMap := make(map[string]any)
@@ -628,6 +663,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 
 			// Build request body.
 			var bodyReader io.Reader
+			var finalBodyStr string
 			if bodyVal, ok := input["body"]; ok && bodyVal != nil {
 				var bodyStr string
 				switch v := bodyVal.(type) {
@@ -640,8 +676,8 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 						bodyStr = string(b)
 					}
 				}
-			// Coerce quoted numbers/booleans (e.g. "47.6" → 47.6) that result
-			// from template placeholders being wrapped in JSON string quotes.
+				// Coerce quoted numbers/booleans (e.g. "47.6" → 47.6) that result
+				// from template placeholders being wrapped in JSON string quotes.
 				if bodyStr != "" {
 					var parsed any
 					if err := json.Unmarshal([]byte(bodyStr), &parsed); err == nil {
@@ -649,6 +685,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 							bodyStr = string(b)
 						}
 					}
+					finalBodyStr = bodyStr
 					bodyReader = strings.NewReader(bodyStr)
 				}
 			}
@@ -676,9 +713,21 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 				req.Header.Set(k, interpolateTemplate(fmt.Sprintf("%v", v), input))
 			}
 
+			// Build curl command for debugging -- always included in output.
+			var curlParts []string
+			curlParts = append(curlParts, fmt.Sprintf("curl -X %s", method))
+			for hk, vals := range req.Header {
+				curlParts = append(curlParts, fmt.Sprintf("-H %q", hk+": "+strings.Join(vals, ", ")))
+			}
+			if finalBodyStr != "" {
+				curlParts = append(curlParts, fmt.Sprintf("-d %q", finalBodyStr))
+			}
+			curlParts = append(curlParts, fmt.Sprintf("%q", rawURL))
+			curlCommand := strings.Join(curlParts, " \\\n  ")
+
 			resp, err := client.Do(req)
 			if err != nil {
-				return nil, fmt.Errorf("http_request: %w", err)
+				return nil, fmt.Errorf("http_request: %w\ncurl: %s", err, curlCommand)
 			}
 			defer resp.Body.Close()
 
@@ -689,21 +738,40 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 
 			var jsonBody map[string]any
 			if err := json.Unmarshal(bodyBytes, &jsonBody); err != nil {
-				// Not JSON — return status only
-				return map[string]any{"status_code": resp.StatusCode, "ok": ok}, nil
+				// Not JSON — check if binary content type and base64-encode to preserve bytes.
+				ct := resp.Header.Get("Content-Type")
+				isBinary := strings.HasPrefix(ct, "image/") ||
+					strings.HasPrefix(ct, "audio/") ||
+					strings.HasPrefix(ct, "video/") ||
+					ct == "application/octet-stream" ||
+					ct == "application/pdf"
+				out := map[string]any{
+					"status_code":   resp.StatusCode,
+					"ok":            ok,
+					"curl":          curlCommand,
+					"content_type":  ct,
+				}
+				if isBinary {
+					out["body"] = base64.StdEncoding.EncodeToString(bodyBytes)
+					out["body_encoding"] = "base64"
+				} else {
+					out["body"] = string(bodyBytes)
+					out["response_body"] = string(bodyBytes) // backwards compat
+				}
+				return out, nil
 			}
 
 			if resultKey != "" {
-				// Store entire parsed JSON under result_key
 				return map[string]any{
 					"status_code": resp.StatusCode,
 					"ok":          ok,
+					"curl":        curlCommand,
 					resultKey:     jsonBody,
 				}, nil
 			}
 
 			// Spread parsed JSON keys directly into context
-			out := map[string]any{"status_code": resp.StatusCode, "ok": ok}
+			out := map[string]any{"status_code": resp.StatusCode, "ok": ok, "curl": curlCommand}
 			for k, v := range jsonBody {
 				out[k] = v
 			}
@@ -756,83 +824,147 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 		},
 	)
 
-	// cf_upsert_contact: upserts a ClickFunnels contact into the cf_contacts PocketBase collection.
-	// Reads contact data from the nested object at input[result_var] (default "contact"),
-	// as produced by cf_get_contact.
+	// cf_upsert_contact: removed — stub kept so existing workflows referencing it fail gracefully.
 	eng.RegisterActivityWithMeta("cf_upsert_contact",
-		func(_ context.Context, input map[string]any) (map[string]any, error) {
-			resultVar, _ := input["result_var"].(string)
-			if resultVar == "" {
-				resultVar = "contact"
-			}
-
-			// Unpack contact data from the nested result_var object.
-			contactData, _ := input[resultVar].(map[string]any)
-			if contactData == nil {
-				return nil, fmt.Errorf("cf_upsert_contact: no contact data found at %q", resultVar)
-			}
-			if errMsg, _ := contactData["error"].(string); errMsg != "" {
-				return nil, fmt.Errorf("cf_upsert_contact: contact lookup failed: %s", errMsg)
-			}
-
-			cfID := int(toFloat64OrZero(contactData["cf_id"]))
-			if cfID == 0 {
-				return nil, fmt.Errorf("cf_upsert_contact: cf_id is required")
-			}
-
-			// Find existing record by cf_id.
-			existing, _ := app.FindRecordsByFilter(
-				"cf_contacts",
-				fmt.Sprintf("cf_id = %d", cfID),
-				"", 1, 0,
-			)
-
-			var rec *core.Record
-			if len(existing) > 0 {
-				rec = existing[0]
-			} else {
-				col, err := app.FindCollectionByNameOrId("cf_contacts")
-				if err != nil {
-					return nil, fmt.Errorf("cf_upsert_contact: find collection: %w", err)
-				}
-				rec = core.NewRecord(col)
-			}
-
-			rec.Set("cf_id", cfID)
-			rec.Set("cf_public_id", contactData["cf_public_id"])
-			rec.Set("email_address", contactData["email_address"])
-			rec.Set("first_name", contactData["first_name"])
-			rec.Set("last_name", contactData["last_name"])
-			rec.Set("phone_number", contactData["phone_number"])
-			rec.Set("is_active", contactData["is_active"])
-
-			if tags := contactData["tags"]; tags != nil {
-				if b, err := json.Marshal(tags); err == nil {
-					rec.Set("tags", string(b))
-				}
-			}
-			if attrs := contactData["custom_attributes"]; attrs != nil {
-				if b, err := json.Marshal(attrs); err == nil {
-					rec.Set("custom_attributes", string(b))
-				}
-			}
-
-			if err := app.SaveNoValidate(rec); err != nil {
-				return nil, fmt.Errorf("cf_upsert_contact: save: %w", err)
-			}
-
-			return map[string]any{
-				"pb_record_id": rec.Id,
-			}, nil
+		func(_ context.Context, _ map[string]any) (map[string]any, error) {
+			return nil, fmt.Errorf("cf_upsert_contact has been removed — replace this node with cf_upsert to update contacts via the ClickFunnels API")
 		},
 		workflow.ActivityMeta{
 			Category:    "ClickFunnels",
-			Description: "Upserts a ClickFunnels contact into the cf_contacts PocketBase collection. Reads contact data from the nested object at result_var (default: \"contact\") as produced by cf_get_contact.",
+			Description: "Removed. Use cf_upsert instead.",
+			InputFields:  []workflow.FieldMeta{},
+			OutputFields: []workflow.FieldMeta{},
+		},
+	)
+
+	// cf_upsert: creates or updates a contact in ClickFunnels via the API.
+	eng.RegisterActivityWithMeta("cf_upsert",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			cfClient := getCF()
+			if cfClient == nil {
+				return nil, fmt.Errorf("cf_upsert: ClickFunnels not configured — add CF_API_KEY in Settings")
+			}
+
+			data, ok := input["data"].(map[string]any)
+			if !ok || data == nil {
+				return nil, fmt.Errorf("cf_upsert: data is required and must be an object (got %T)", input["data"])
+			}
+
+			strPtr := func(key string) *string {
+				if v, ok := data[key]; ok {
+					if s, ok := v.(string); ok && s != "" {
+						return &s
+					}
+				}
+				return nil
+			}
+
+			params := clickfunnels.ContactParams{
+				EmailAddress: strPtr("email_address"),
+				FirstName:    strPtr("first_name"),
+				LastName:     strPtr("last_name"),
+				PhoneNumber:  strPtr("phone_number"),
+				TimeZone:     strPtr("time_zone"),
+				FbURL:        strPtr("fb_url"),
+				TwitterURL:   strPtr("twitter_url"),
+				InstagramURL: strPtr("instagram_url"),
+				LinkedinURL:  strPtr("linkedin_url"),
+				WebsiteURL:   strPtr("website_url"),
+			}
+
+			// custom_attributes: accepts a native map or a JSON-encoded object string.
+			switch ca := data["custom_attributes"].(type) {
+			case map[string]any:
+				attrs := make(map[string]string, len(ca))
+				for k, v := range ca {
+					attrs[k] = fmt.Sprintf("%v", v)
+				}
+				params.CustomAttributes = attrs
+			case string:
+				if ca != "" {
+					var raw map[string]any
+					if json.Unmarshal([]byte(ca), &raw) == nil {
+						attrs := make(map[string]string, len(raw))
+						for k, v := range raw {
+							attrs[k] = fmt.Sprintf("%v", v)
+						}
+						params.CustomAttributes = attrs
+					}
+				}
+			}
+
+			var contact *clickfunnels.Contact
+			var err error
+
+			contactIDStr, _ := input["contact_id"].(string)
+			if contactIDStr == "" {
+				if v, ok := input["contact_id"].(float64); ok && v != 0 {
+					contactIDStr = fmt.Sprintf("%d", int64(v))
+				}
+			}
+
+			if contactIDStr != "" {
+				id, parseErr := strconv.Atoi(contactIDStr)
+				if parseErr != nil {
+					return nil, fmt.Errorf("cf_upsert: contact_id must be numeric, got %q", contactIDStr)
+				}
+				contact, err = cfClient.UpdateContact(ctx, id, params)
+				if err != nil {
+					return nil, fmt.Errorf("cf_upsert: update contact: %w", err)
+				}
+			} else {
+				contact, err = cfClient.CreateContact(ctx, params)
+				if err != nil {
+					return nil, fmt.Errorf("cf_upsert: create contact: %w", err)
+				}
+			}
+
+			out := map[string]any{
+				"id":         contact.ID,
+				"public_id":  contact.PublicID,
+				"is_active":  contact.IsActive,
+				"tags":       contact.Tags,
+				"custom_attributes": contact.CustomAttributes,
+				"created_at": contact.CreatedAt,
+				"updated_at": contact.UpdatedAt,
+			}
+			if contact.EmailAddress != nil {
+				out["email_address"] = *contact.EmailAddress
+			}
+			if contact.FirstName != nil {
+				out["first_name"] = *contact.FirstName
+			}
+			if contact.LastName != nil {
+				out["last_name"] = *contact.LastName
+			}
+			if contact.PhoneNumber != nil {
+				out["phone_number"] = *contact.PhoneNumber
+			}
+			if rk, _ := input["result_key"].(string); rk != "" {
+				return map[string]any{rk: out}, nil
+			}
+			return out, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "ClickFunnels",
+			Description: "Create or update a ClickFunnels contact via the API. Omit contact_id to create; supply it to update.",
 			InputFields: []workflow.FieldMeta{
-				{Name: "result_var", Type: "string", Description: "Context key holding the cf_get_contact result (default: \"contact\")"},
+				{Name: "contact_id", Type: "string", Required: false, Description: "Numeric CF contact ID to update. Omit to create a new contact."},
+				{Name: "result_key", Type: "string", Description: "Context key to store result under (e.g. \"cf_contact\")"},
+				{Name: "data", Type: "object", Required: true, Description: "Contact fields: email_address, first_name, last_name, phone_number, time_zone, fb_url, twitter_url, instagram_url, linkedin_url, website_url, custom_attributes"},
 			},
 			OutputFields: []workflow.FieldMeta{
-				{Name: "pb_record_id", Type: "string", Description: "PocketBase record ID of the upserted contact"},
+				{Name: "id", Type: "number", Description: "ClickFunnels contact ID"},
+				{Name: "public_id", Type: "string", Description: "ClickFunnels public ID"},
+				{Name: "email_address", Type: "string", Description: "Contact email address"},
+				{Name: "first_name", Type: "string", Description: "Contact first name"},
+				{Name: "last_name", Type: "string", Description: "Contact last name"},
+				{Name: "phone_number", Type: "string", Description: "Contact phone number"},
+				{Name: "is_active", Type: "bool", Description: "Whether the contact is active"},
+				{Name: "tags", Type: "array", Description: "Tags currently on the contact"},
+				{Name: "custom_attributes", Type: "object", Description: "Custom attribute key/value pairs"},
+				{Name: "created_at", Type: "string", Description: "CF record creation timestamp"},
+				{Name: "updated_at", Type: "string", Description: "CF record last-updated timestamp"},
 			},
 		},
 	)
@@ -910,6 +1042,302 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "contact", Type: "object", Description: "Contact data object (or error object) stored under result_var. Contains: status, cf_id, cf_public_id, email_address, first_name, last_name, phone_number, is_active, tags, custom_attributes. On error: status=\"error\", error=\"<message>\"."},
+			},
+		},
+	)
+
+	// cf_search_contact: searches for CF contacts by partial email address.
+	// Uses filter[email_address] on the API and does a case-insensitive contains filter client-side.
+	eng.RegisterActivityWithMeta("cf_search_contact",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			resultVar, _ := input["result_var"].(string)
+			if resultVar == "" {
+				resultVar = "contacts"
+			}
+
+			setError := func(msg string) (map[string]any, error) {
+				return map[string]any{
+					resultVar: map[string]any{
+						"error":  msg,
+						"status": "error",
+						"count":  0,
+						"items":  []any{},
+					},
+				}, nil
+			}
+
+			cfClient := getCF()
+			if cfClient == nil {
+				return setError("ClickFunnels client not configured (CF_API_KEY missing)")
+			}
+
+			email, _ := input["email"].(string)
+			if email == "" {
+				return setError("email is required")
+			}
+
+			maxResults := int(toFloat64OrZero(input["max_results"]))
+			if maxResults <= 0 {
+				maxResults = 10
+			}
+
+			contacts, err := cfClient.SearchContactsByEmail(ctx, email, maxResults)
+			if err != nil {
+				return setError(err.Error())
+			}
+
+			items := make([]any, 0, len(contacts))
+			for _, c := range contacts {
+				item := map[string]any{
+					"cf_id":             c.ID,
+					"cf_public_id":      c.PublicID,
+					"is_active":         c.IsActive,
+					"tags":              c.Tags,
+					"custom_attributes": c.CustomAttributes,
+				}
+				if c.EmailAddress != nil {
+					item["email_address"] = *c.EmailAddress
+				}
+				if c.FirstName != nil {
+					item["first_name"] = *c.FirstName
+				}
+				if c.LastName != nil {
+					item["last_name"] = *c.LastName
+				}
+				if c.PhoneNumber != nil {
+					item["phone_number"] = *c.PhoneNumber
+				}
+				items = append(items, item)
+			}
+
+			// Also expose the first match as a convenience at result_var.first
+			var first any
+			if len(items) > 0 {
+				first = items[0]
+			}
+
+			return map[string]any{
+				resultVar: map[string]any{
+					"status": "ok",
+					"count":  len(items),
+					"items":  items,
+					"first":  first,
+				},
+			}, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "ClickFunnels",
+			Description: "Searches ClickFunnels contacts by partial email address (case-insensitive contains match). Results are stored under result_var (default: \"contacts\") with count, items array, and first match.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "email", Type: "string", Description: "Email address to search for (partial match supported)", Required: true},
+				{Name: "max_results", Type: "number", Description: "Maximum number of contacts to return (default: 10)"},
+				{Name: "result_var", Type: "string", Description: "Context key to store the result under (default: \"contacts\")"},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "contacts", Type: "object", Description: "Result stored under result_var. Contains: status, count, items (array of contact objects), first (first match). Each item has: cf_id, cf_public_id, email_address, first_name, last_name, phone_number, is_active, tags, custom_attributes."},
+			},
+		},
+	)
+
+	// cf_get_tags: fetches all contact tags defined in the ClickFunnels workspace.
+	eng.RegisterActivityWithMeta("cf_get_tags",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			resultVar, _ := input["result_var"].(string)
+			if resultVar == "" {
+				resultVar = "tags"
+			}
+
+			cfClient := getCF()
+			if cfClient == nil {
+				return map[string]any{
+					resultVar: map[string]any{
+						"error":  "ClickFunnels client not configured (CF_API_KEY missing)",
+						"status": "error",
+						"count":  0,
+						"items":  []any{},
+					},
+				}, nil
+			}
+
+			tags, err := cfClient.ListTags(ctx, "")
+			if err != nil {
+				return map[string]any{
+					resultVar: map[string]any{
+						"error":  err.Error(),
+						"status": "error",
+						"count":  0,
+						"items":  []any{},
+					},
+				}, nil
+			}
+
+			items := make([]any, 0, len(tags))
+			for _, t := range tags {
+				items = append(items, map[string]any{
+					"id":         t.ID,
+					"public_id":  t.PublicID,
+					"name":       t.Name,
+					"color":      t.Color,
+				})
+			}
+
+			return map[string]any{
+				resultVar: map[string]any{
+					"status": "ok",
+					"count":  len(items),
+					"items":  items,
+				},
+			}, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "ClickFunnels",
+			Description: "Fetches all contact tags defined in the ClickFunnels workspace. Results stored under result_var (default: \"tags\") with count and items array.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "result_var", Type: "string", Description: "Context key to store the result under (default: \"tags\")"},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "tags", Type: "object", Description: "Result under result_var. Contains: status, count, items[]. Each item has: id, public_id, name, color."},
+			},
+		},
+	)
+
+	// cf_add_tag: applies one or more tags to a ClickFunnels contact.
+	// tag_ids is a JSON array of tag IDs (ints), e.g. [123, 456].
+	eng.RegisterActivityWithMeta("cf_add_tag",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			cfClient := getCF()
+			if cfClient == nil {
+				return nil, fmt.Errorf("cf_add_tag: ClickFunnels client not configured")
+			}
+
+			contactID := int(toFloat64OrZero(input["contact_id"]))
+			if contactID == 0 {
+				return nil, fmt.Errorf("cf_add_tag: contact_id is required")
+			}
+
+			tagIDs, err := parseIntSlice(input["tag_ids"])
+			if err != nil || len(tagIDs) == 0 {
+				return nil, fmt.Errorf("cf_add_tag: tag_ids must be a non-empty array of tag IDs")
+			}
+
+			var added []int
+			var skipped []int
+			var addErrs []string
+			var appliedRecords []any
+			for _, tagID := range tagIDs {
+				applied, err := cfClient.AddAppliedTag(ctx, contactID, tagID)
+				if err != nil {
+					skipped = append(skipped, tagID)
+					addErrs = append(addErrs, fmt.Sprintf("tag %d: %v", tagID, err))
+				} else {
+					added = append(added, tagID)
+					if applied != nil {
+						appliedRecords = append(appliedRecords, map[string]any{
+							"id":         applied.ID,
+							"tag_id":     applied.TagID,
+							"tag_name":   applied.Tag.Name,
+							"applied_at": applied.Tag.AppliedAt,
+						})
+					}
+				}
+			}
+
+			out := map[string]any{
+				"added":           added,
+				"skipped":         skipped,
+				"count":           len(added),
+				"applied_records": appliedRecords,
+			}
+			if len(addErrs) > 0 {
+				out["errors"] = addErrs
+			}
+			if rk, _ := input["result_key"].(string); rk != "" {
+				return map[string]any{rk: out}, nil
+			}
+			return out, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "ClickFunnels",
+			Description: "Applies one or more tags to a ClickFunnels contact. Use the tag picker to select tags.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "contact_id", Type: "number", Description: "Numeric ClickFunnels contact ID", Required: true},
+				{Name: "tag_ids", Type: "string", Description: "JSON array of tag IDs to apply, e.g. [123, 456]", Required: true},
+				{Name: "result_key", Type: "string", Description: "Context key to store result under (e.g. \"cf_tag_result\")"},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "added", Type: "array", Description: "Tag IDs successfully applied"},
+				{Name: "skipped", Type: "array", Description: "Tag IDs that failed (already applied or error)"},
+				{Name: "count", Type: "number", Description: "Number of tags successfully applied"},
+				{Name: "applied_records", Type: "array", Description: "Raw CF response for each applied tag (id, tag_id, tag_name, applied_at)"},
+			},
+		},
+	)
+
+	// cf_remove_tag: removes one or more tags from a ClickFunnels contact.
+	// Looks up the applied-tag record IDs first, then deletes each one.
+	eng.RegisterActivityWithMeta("cf_remove_tag",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			cfClient := getCF()
+			if cfClient == nil {
+				return nil, fmt.Errorf("cf_remove_tag: ClickFunnels client not configured")
+			}
+
+			contactID := int(toFloat64OrZero(input["contact_id"]))
+			if contactID == 0 {
+				return nil, fmt.Errorf("cf_remove_tag: contact_id is required")
+			}
+
+			tagIDs, err := parseIntSlice(input["tag_ids"])
+			if err != nil || len(tagIDs) == 0 {
+				return nil, fmt.Errorf("cf_remove_tag: tag_ids must be a non-empty array of tag IDs")
+			}
+
+			// Fetch applied tags to map tag_id → applied_tag_id.
+			applied, err := cfClient.ListAppliedTags(ctx, contactID)
+			if err != nil {
+				return nil, fmt.Errorf("cf_remove_tag: list applied tags: %w", err)
+			}
+			appliedByTagID := make(map[int]int, len(applied))
+			for _, a := range applied {
+				appliedByTagID[a.TagID] = a.ID
+			}
+
+			var removed, skipped []int
+			for _, tagID := range tagIDs {
+				appliedID, ok := appliedByTagID[tagID]
+				if !ok {
+					skipped = append(skipped, tagID) // tag not currently applied
+					continue
+				}
+				if err := cfClient.RemoveAppliedTag(ctx, contactID, appliedID); err != nil {
+					skipped = append(skipped, tagID)
+				} else {
+					removed = append(removed, tagID)
+				}
+			}
+
+			out := map[string]any{
+				"removed": removed,
+				"skipped": skipped,
+				"count":   len(removed),
+			}
+			if rk, _ := input["result_key"].(string); rk != "" {
+				return map[string]any{rk: out}, nil
+			}
+			return out, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "ClickFunnels",
+			Description: "Removes one or more tags from a ClickFunnels contact. Use the tag picker to select tags.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "contact_id", Type: "number", Description: "Numeric ClickFunnels contact ID", Required: true},
+				{Name: "tag_ids", Type: "string", Description: "JSON array of tag IDs to remove, e.g. [123, 456]", Required: true},
+				{Name: "result_key", Type: "string", Description: "Context key to store result under (e.g. \"cf_remove_result\")"},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "removed", Type: "array", Description: "Tag IDs successfully removed"},
+				{Name: "skipped", Type: "array", Description: "Tag IDs not found on this contact or that failed"},
+				{Name: "count", Type: "number", Description: "Number of tags successfully removed"},
 			},
 		},
 	)
@@ -1321,6 +1749,141 @@ func registerTextSubstitute(eng *workflow.Engine) {
 	)
 }
 
+func registerFormatDate(eng *workflow.Engine) {
+	parsLayouts := []string{
+		"2006-01-02 15:04:05.000Z",
+		"2006-01-02 15:04:05.999Z07:00",
+		"2006-01-02 15:04:05Z07:00",
+		"2006-01-02 15:04:05",
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.000Z",
+		"2006-01-02",
+		"01/02/2006",
+		"January 2, 2006",
+	}
+
+	eng.RegisterActivityWithMeta("format_date",
+		func(_ context.Context, input map[string]any) (map[string]any, error) {
+			keyName, _ := input["value"].(string)
+			if keyName == "" {
+				return nil, fmt.Errorf("format_date: value (context key) is required")
+			}
+			format, _ := input["format"].(string)
+			if format == "" {
+				return nil, fmt.Errorf("format_date: format is required")
+			}
+
+			// Resolve the value via dot-path traversal (e.g. "pb_contact.records.0.birthday").
+			raw := resolveNestedInput(input, keyName)
+
+			var t time.Time
+			switch v := raw.(type) {
+			case time.Time:
+				t = v
+			case string:
+				if v == "" {
+					return nil, fmt.Errorf("format_date: context key %q is empty", keyName)
+				}
+				var parseErr error
+				for _, layout := range parsLayouts {
+					t, parseErr = time.Parse(layout, v)
+					if parseErr == nil {
+						break
+					}
+				}
+				if parseErr != nil {
+					return nil, fmt.Errorf("format_date: could not parse %q as a date", v)
+				}
+			default:
+				return nil, fmt.Errorf("format_date: context key %q is not a string or time.Time (got %T)", keyName, raw)
+			}
+
+			setNestedInput(input, keyName, t.Format(format))
+			// Return the top-level key so the engine merges the mutated structure back.
+			topKey := strings.SplitN(keyName, ".", 2)[0]
+			return map[string]any{topKey: input[topKey]}, nil
+		},
+		workflow.ActivityMeta{
+			Category:    "Utility",
+			Description: "Parses a date string from a context key and reformats it in-place using a Go layout string.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "value", Type: "context_key", Required: true, Description: "Context key containing the date string to reformat (e.g. birthday)."},
+				{Name: "format", Type: "string", Required: true, Description: "Go time layout string for output. Common formats: \"January 2, 2006\" · \"01/02/2006\" · \"02 Jan 2006\" · \"2006-01-02\" · \"Jan 2, 2006\" · \"Monday, January 2, 2006\""},
+			},
+			OutputFields: []workflow.FieldMeta{
+				{Name: "<value>", Type: "string", Description: "The reformatted date written back to the same context key that was selected."},
+			},
+		},
+	)
+}
+
+// resolveNestedInput looks up a dot-notation key (e.g. "pb_contact.records.0.birthday")
+// from the activity input map, traversing nested maps and slices as needed.
+func resolveNestedInput(input map[string]any, key string) any {
+	if v, ok := input[key]; ok {
+		return v
+	}
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	var cur any = map[string]any(input)
+	for _, p := range parts {
+		switch v := cur.(type) {
+		case map[string]any:
+			val, ok := v[p]
+			if !ok {
+				return nil
+			}
+			cur = val
+		case []any:
+			i, err := strconv.Atoi(p)
+			if err != nil || i < 0 || i >= len(v) {
+				return nil
+			}
+			cur = v[i]
+		default:
+			return nil
+		}
+	}
+	return cur
+}
+
+// setNestedInput writes value to a dot-notation path inside the input map,
+// mutating nested maps/slices in-place (they share references with the workflow context).
+func setNestedInput(input map[string]any, key string, value any) {
+	parts := strings.Split(key, ".")
+	if len(parts) == 1 {
+		input[key] = value
+		return
+	}
+	var cur any = map[string]any(input)
+	for i, p := range parts {
+		isLast := i == len(parts)-1
+		switch v := cur.(type) {
+		case map[string]any:
+			if isLast {
+				v[p] = value
+				return
+			}
+			cur = v[p]
+		case []any:
+			idx, err := strconv.Atoi(p)
+			if err != nil || idx < 0 || idx >= len(v) {
+				return
+			}
+			if isLast {
+				v[idx] = value
+				return
+			}
+			cur = v[idx]
+		default:
+			return
+		}
+	}
+}
+
 // ── Graphs ────────────────────────────────────────────────────────────────────
 
 func registerGraphs(eng *workflow.Engine, getCF func() *clickfunnels.Client) error {
@@ -1510,6 +2073,16 @@ func pbQueryOp(op string) string {
 	}
 }
 
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func inputKeys(m map[string]any) []string { return mapKeys(m) }
+
 func toFloat64OrZero(v any) float64 {
 	switch n := v.(type) {
 	case float64:
@@ -1529,6 +2102,30 @@ func toFloat64OrZero(v any) float64 {
 	return 0
 }
 
+// parseIntSlice accepts a []any (from JSON decode) or a JSON string like "[1,2,3]"
+// and returns a slice of ints.
+func parseIntSlice(v any) ([]int, error) {
+	switch val := v.(type) {
+	case []any:
+		out := make([]int, 0, len(val))
+		for _, item := range val {
+			out = append(out, int(toFloat64OrZero(item)))
+		}
+		return out, nil
+	case string:
+		var raw []any
+		if err := json.Unmarshal([]byte(val), &raw); err != nil {
+			return nil, err
+		}
+		out := make([]int, 0, len(raw))
+		for _, item := range raw {
+			out = append(out, int(toFloat64OrZero(item)))
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("parseIntSlice: unsupported type %T", v)
+}
+
 var templateRe = regexp.MustCompile(`\{\{([\w.]+)\}\}`)
 
 // interpolateTemplate replaces {{path}} placeholders with values from data.
@@ -1536,6 +2133,10 @@ var templateRe = regexp.MustCompile(`\{\{([\w.]+)\}\}`)
 func interpolateTemplate(s string, data map[string]any) string {
 	return templateRe.ReplaceAllStringFunc(s, func(match string) string {
 		path := match[2 : len(match)-2] // strip {{ }}
+		// Strip |type hint suffix(es) (e.g. {{price|number|number}} → look up "price")
+		if idx := strings.Index(path, "|"); idx != -1 {
+			path = path[:idx]
+		}
 		val := resolvePath(data, path)
 		if val == nil {
 			return match // leave unreplaced if not found
@@ -1596,4 +2197,57 @@ func resolvePath(data map[string]any, path string) any {
 		}
 	}
 	return cur
+}
+
+// ── run_workflow ───────────────────────────────────────────────────────────────
+
+// registerRunWorkflow registers the "run_workflow" activity which synchronously
+// runs a named sub-workflow and waits for it to complete, merging its output
+// context back as this node's output.
+func registerRunWorkflow(eng *workflow.Engine) {
+	eng.RegisterActivityWithMeta("run_workflow",
+		func(ctx context.Context, input map[string]any) (map[string]any, error) {
+			graphName, _ := input["graph_name"].(string)
+			if graphName == "" {
+				return nil, fmt.Errorf("run_workflow: graph_name is required")
+			}
+
+			// Build initial context for the sub-workflow.
+			inputCtx, _ := input["input"].(map[string]any)
+
+			subWF, err := eng.CreateWorkflow(ctx, "", graphName, inputCtx, nil)
+			if err != nil {
+				return nil, fmt.Errorf("run_workflow: failed to create sub-workflow %q: %w", graphName, err)
+			}
+
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-ticker.C:
+					updated, err := eng.Store().GetWorkflow(ctx, subWF.ID)
+					if err != nil {
+						return nil, fmt.Errorf("run_workflow: failed to poll sub-workflow %s: %w", subWF.ID, err)
+					}
+					switch updated.Status {
+					case workflow.StatusFailed:
+						return nil, fmt.Errorf("sub-workflow %s (%s) failed", subWF.ID, graphName)
+					case workflow.StatusCompleted:
+						return updated.Context, nil
+					}
+				}
+			}
+		},
+		workflow.ActivityMeta{
+			Category:    "Utility",
+			Description: "Run another workflow and wait for it to complete. The sub-workflow's output context is merged back as this node's output.",
+			InputFields: []workflow.FieldMeta{
+				{Name: "graph_name", Type: "workflow_graph", Required: true, Description: "Name of the workflow graph to run"},
+				{Name: "input", Type: "object", Required: false, Description: "Extra context to pass into the sub-workflow (merged with current context)"},
+			},
+		},
+	)
 }
