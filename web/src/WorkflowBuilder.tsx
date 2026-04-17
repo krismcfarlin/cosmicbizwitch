@@ -3063,10 +3063,11 @@ function PromptVarsBuilderModal({ existingVars, onSave, onClose, defaultSourceJs
 
 // ── GdriveTemplateVarsBuilderModal ────────────────────────────────────────────
 
-function GdriveTemplateVarsBuilderModal({ templateId, existingVars, onSave, onClose, defaultSourceJson = '' }: {
+function GdriveTemplateVarsBuilderModal({ templateId, existingVars, existingImageVars, onSave, onClose, defaultSourceJson = '' }: {
   templateId: string
   existingVars: Record<string, string>
-  onSave: (vars: Record<string, string>) => void
+  existingImageVars: Record<string, string>
+  onSave: (vars: Record<string, string>, imageVars: Record<string, string>) => void
   onClose: () => void
   defaultSourceJson?: string
 }) {
@@ -3080,8 +3081,12 @@ function GdriveTemplateVarsBuilderModal({ templateId, existingVars, onSave, onCl
   const [vars, setVars] = useState<Array<{ key: string; value: string }>>(
     Object.entries(existingVars).map(([k, v]) => ({ key: k, value: v }))
   )
+  const [imageVars, setImageVars] = useState<Array<{ key: string; value: string }>>(
+    Object.entries(existingImageVars).map(([k, v]) => ({ key: k, value: v }))
+  )
   const dragRef = useRef<string>('')
   const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+  const [dragOverImgIdx, setDragOverImgIdx] = useState<number | null>(null)
 
   // Fetch and parse template document on mount
   useEffect(() => {
@@ -3166,6 +3171,18 @@ function GdriveTemplateVarsBuilderModal({ templateId, existingVars, onSave, onCl
     setDragOverIdx(null)
   }
 
+  const addBlankImage = () => setImageVars(v => [...v, { key: '', value: '' }])
+  const updateImgKey = (i: number, k: string) => setImageVars(v => v.map((r, idx) => idx === i ? { ...r, key: k } : r))
+  const updateImgVal = (i: number, val: string) => setImageVars(v => v.map((r, idx) => idx === i ? { ...r, value: val } : r))
+  const removeImgRow = (i: number) => setImageVars(v => v.filter((_, idx) => idx !== i))
+
+  const handleImgDrop = (i: number) => {
+    const from = dragRef.current
+    if (!from) return
+    updateImgVal(i, `{{${from}}}`)
+    setDragOverImgIdx(null)
+  }
+
   const usedPaths = new Set(
     vars.map(r => { const m = r.value.match(/^\{\{(.+)\}\}$/); return m ? m[1] : null }).filter(Boolean) as string[]
   )
@@ -3175,7 +3192,11 @@ function GdriveTemplateVarsBuilderModal({ templateId, existingVars, onSave, onCl
     for (const { key, value } of vars) {
       if (key.trim()) result[key.trim()] = value
     }
-    onSave(result)
+    const imgResult: Record<string, string> = {}
+    for (const { key, value } of imageVars) {
+      if (key.trim()) imgResult[key.trim()] = value
+    }
+    onSave(result, imgResult)
   }
 
   return (
@@ -3317,6 +3338,57 @@ function GdriveTemplateVarsBuilderModal({ templateId, existingVars, onSave, onCl
               >
                 + Add Variable
               </button>
+
+              {/* ── Replace Images subsection ── */}
+              <div style={{ borderTop: '2px solid #e0e6ed', marginTop: '12px', paddingTop: '12px' }}>
+                <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+                  Replace Images <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(alt text → image URL)</span>
+                </div>
+                <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5, marginBottom: '6px' }}>
+                  Set an image's alt text as the key and provide its replacement URL as the value.
+                </div>
+
+                {imageVars.map(({ key, value }, i) => {
+                  const isOver = dragOverImgIdx === i
+                  const isMapped = value.startsWith('{{') && value.endsWith('}}')
+                  return (
+                    <div
+                      key={i}
+                      onDragOver={e => { e.preventDefault(); setDragOverImgIdx(i) }}
+                      onDragLeave={() => setDragOverImgIdx(null)}
+                      onDrop={() => handleImgDrop(i)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '6px',
+                        background: isOver ? '#dcfce7' : isMapped ? '#f0fdf4' : '#f8fafc',
+                        border: `1px dashed ${isOver ? '#22c55e' : isMapped ? '#86efac' : '#cbd5e1'}`,
+                        borderRadius: '4px', padding: '6px 8px', marginBottom: '6px', transition: 'background 0.1s, border-color 0.1s',
+                      }}
+                    >
+                      <input
+                        value={key}
+                        onChange={e => updateImgKey(i, e.target.value)}
+                        placeholder="image alt text"
+                        style={{ flex: '0 0 110px', fontFamily: 'monospace', fontSize: '11px', padding: '4px 6px', border: '1px solid #e2e8f0', borderRadius: '3px', background: 'white' }}
+                      />
+                      <span style={{ color: '#bbb', fontSize: '11px', flexShrink: 0 }}>→</span>
+                      <input
+                        value={value}
+                        onChange={e => updateImgVal(i, e.target.value)}
+                        placeholder="{{context_key}} or image URL"
+                        style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '4px 6px', border: '1px solid #e2e8f0', borderRadius: '3px', background: isMapped ? '#f0fdf4' : 'white', color: isMapped ? '#0d9488' : '#334155', minWidth: 0 }}
+                      />
+                      <button onClick={() => removeImgRow(i)} style={{ flexShrink: 0, border: 'none', background: 'none', color: '#e74c3c', cursor: 'pointer', fontSize: '16px', padding: '0 2px', lineHeight: 1 }}>×</button>
+                    </div>
+                  )
+                })}
+
+                <button
+                  onClick={addBlankImage}
+                  style={{ alignSelf: 'flex-start', fontSize: '11px', padding: '4px 10px', border: '1px solid #d0d5dd', borderRadius: '4px', background: 'white', cursor: 'pointer', color: '#555' }}
+                >
+                  + Add Image
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -3504,7 +3576,7 @@ function HttpBodyBuilderModal({ existingBody, onSave, onClose, defaultSourceJson
 
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }}>
-      <div style={{ background: 'white', borderRadius: '10px', width: '900px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '900px', height: '90vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
 
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: '#1e293b', color: 'white' }}>
@@ -3594,10 +3666,9 @@ function HttpBodyBuilderModal({ existingBody, onSave, onClose, defaultSourceJson
             <textarea
               value={bodyText}
               onChange={e => handleBodyTextChange(e.target.value)}
-              rows={6}
               placeholder={'{\n  "latitude": "",\n  "longitude": "",\n  "birth_time": ""\n}'}
               spellCheck={false}
-              style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+              style={{ flex: 1, minHeight: '180px', width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
             />
             {bodyParseError && <div style={{ color: '#e74c3c', fontSize: '11px' }}>{bodyParseError}</div>}
             <button
@@ -4861,9 +4932,10 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
         <GdriveTemplateVarsBuilderModal
           templateId={(node.staticInput ?? {}).template_id ?? ''}
           existingVars={(() => { try { return JSON.parse((node.staticInput ?? {}).vars ?? '{}') } catch { return {} } })()}
+          existingImageVars={(() => { try { return JSON.parse((node.staticInput ?? {}).image_vars ?? '{}') } catch { return {} } })()}
           defaultSourceJson={debugContext}
-          onSave={vars => {
-            setInput('vars', JSON.stringify(vars))
+          onSave={(vars, imageVars) => {
+            set({ staticInput: { ...(node.staticInput ?? {}), vars: JSON.stringify(vars), image_vars: JSON.stringify(imageVars) } })
             setShowGdriveTemplateVarsBuilder(false)
           }}
           onClose={() => setShowGdriveTemplateVarsBuilder(false)}
@@ -4901,6 +4973,7 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
       </button>
 
       <CopyNodeButton node={node} />
+      <CopyNodeJsonButton node={node} />
 
       <button onClick={onDelete} style={{ display: 'block', marginTop: '8px', width: '100%', ...iconBtn('#e74c3c'), padding: '6px' }}>
         Delete Node
@@ -4929,6 +5002,27 @@ function CopyNodeButton({ node }: { node: BNode }) {
   return (
     <button onClick={handleCopy} style={{ display: 'block', marginTop: '8px', width: '100%', ...iconBtn('#0ea5e9'), padding: '6px' }}>
       {copied ? '✓ Copied' : '⎘ Copy Node'}
+    </button>
+  )
+}
+
+function CopyNodeJsonButton({ node }: { node: BNode }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = () => {
+    const data = {
+      id: node.id,
+      activityName: node.activityName,
+      label: node.label,
+      staticInput: node.staticInput ?? {},
+    }
+    navigator.clipboard.writeText(JSON.stringify(data, null, 2)).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+  return (
+    <button onClick={handleCopy} style={{ display: 'block', marginTop: '8px', width: '100%', ...iconBtn('#7c3aed'), padding: '6px' }}>
+      {copied ? '✓ JSON Copied' : '{ } Copy Node JSON'}
     </button>
   )
 }

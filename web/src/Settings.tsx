@@ -29,6 +29,7 @@ export default function Settings() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [googleConnected, setGoogleConnected] = useState<boolean | null>(null)
+  const [googleTokenExpiry, setGoogleTokenExpiry] = useState<string | null>(null)
   const [googleConnecting, setGoogleConnecting] = useState(false)
   const [googleRefreshToken, setGoogleRefreshToken] = useState('')
   const [testTemplateDocId, setTestTemplateDocId] = useState('')
@@ -78,7 +79,10 @@ export default function Settings() {
   useEffect(() => {
     fetch('/api/google/auth/status')
       .then(r => r.json())
-      .then(d => setGoogleConnected(d.connected))
+      .then(d => {
+        setGoogleConnected(d.connected)
+        if (d.access_token_expires_at) setGoogleTokenExpiry(d.access_token_expires_at)
+      })
       .catch(() => setGoogleConnected(false))
   }, [])
 
@@ -349,13 +353,26 @@ export default function Settings() {
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexShrink: 0, marginLeft: '24px' }}>
-              {googleConnected === null ? (
-                <span style={{ fontSize: '12px', color: '#aaa' }}>Checking...</span>
-              ) : googleConnected ? (
-                <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 600 }}>● Connected</span>
-              ) : (
-                <span style={{ fontSize: '12px', color: '#e74c3c', fontWeight: 500 }}>○ Not connected</span>
-              )}
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
+                {googleConnected === null ? (
+                  <span style={{ fontSize: '12px', color: '#aaa' }}>Checking...</span>
+                ) : googleConnected ? (
+                  <span style={{ fontSize: '12px', color: '#27ae60', fontWeight: 600 }}>● Connected</span>
+                ) : (
+                  <span style={{ fontSize: '12px', color: '#e74c3c', fontWeight: 500 }}>○ Not connected</span>
+                )}
+                {googleTokenExpiry && (() => {
+                  const exp = new Date(googleTokenExpiry)
+                  const minsLeft = Math.round((exp.getTime() - Date.now()) / 60000)
+                  const label = exp.toLocaleString()
+                  const warn = minsLeft < 10
+                  return (
+                    <span style={{ fontSize: '11px', color: warn ? '#e67e22' : '#888' }}>
+                      Token expires: {label}{warn ? ` (${minsLeft}m)` : ''}
+                    </span>
+                  )
+                })()}
+              </div>
               <button
                 onClick={connectGoogle}
                 disabled={googleConnecting}

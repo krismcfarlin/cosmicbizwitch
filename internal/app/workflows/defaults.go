@@ -22,7 +22,6 @@ import (
 	telegramapp "cosmicbizwitch/internal/app/telegram"
 	"cosmicbizwitch/pkg/workflow"
 
-	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 )
 
@@ -168,106 +167,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 
 	// pb_query: queries a PocketBase collection by filter, returns matching records.
 	eng.RegisterActivityWithMeta("pb_query",
-		func(_ context.Context, input map[string]any) (map[string]any, error) {
-			tableName, _ := input["table_name"].(string)
-			if tableName == "" {
-				return nil, fmt.Errorf("pb_query: table_name is required")
-			}
-
-			limitF, _ := input["limit"].(float64)
-			limit := int(limitF)
-			if limit <= 0 {
-				limit = 50
-			}
-
-			// Build filter from structured rules or fall back to raw filter string.
-			filterStr := ""
-			params := dbx.Params{}
-			rawFilters, _ := input["filters"].([]any)
-			if len(rawFilters) > 0 {
-				filterMode, _ := input["filter_mode"].(string)
-				sep := " && "
-				if filterMode == "or" {
-					sep = " || "
-				}
-				parts := []string{}
-				for i, rf := range rawFilters {
-					rule, ok := rf.(map[string]any)
-					if !ok {
-						continue
-					}
-					field, _ := rule["field"].(string)
-					operator, _ := rule["operator"].(string)
-					value := rule["value"]
-					if field == "" || operator == "" {
-						continue
-					}
-					key := fmt.Sprintf("v%d", i)
-					parts = append(parts, fmt.Sprintf("%s %s {:%s}", field, pbQueryOp(operator), key))
-					params[key] = value
-				}
-				if len(parts) > 0 {
-					filterStr = strings.Join(parts, sep)
-				}
-			}
-			// Backward compat: raw filter string.
-			if filterStr == "" {
-				rawFilter, _ := input["filter"].(string)
-				filterStr = rawFilter
-			}
-			if filterStr == "" {
-				filterStr = "1=1"
-			}
-
-			// Build sort string: "-field" = desc, "field" = asc.
-			sort := ""
-			sortField, _ := input["sort_field"].(string)
-			sortDir, _ := input["sort_dir"].(string)
-			if sortField != "" {
-				if sortDir == "desc" {
-					sort = "-" + sortField
-				} else {
-					sort = sortField
-				}
-			}
-
-			records, err := app.FindRecordsByFilter(tableName, filterStr, sort, limit, 0, params)
-			if err != nil {
-				return nil, fmt.Errorf("pb_query: %w", err)
-			}
-
-			out := map[string]any{
-				"found": len(records) > 0,
-				"count": len(records),
-			}
-
-			recList := make([]any, 0, len(records))
-			for _, rec := range records {
-				m := map[string]any{"id": rec.Id}
-				for _, col := range rec.Collection().Fields {
-					m[col.GetName()] = rec.Get(col.GetName())
-				}
-				recList = append(recList, m)
-			}
-			out["records"] = recList
-
-			// Flat fields from first record for easy transition access.
-			if len(records) > 0 {
-				rec := records[0]
-				out["id"] = rec.Id
-				for _, col := range rec.Collection().Fields {
-					out[col.GetName()] = rec.Get(col.GetName())
-				}
-			}
-
-			// If result_key is set, nest everything under that key so multiple
-			// pb_query nodes don't overwrite each other in the context.
-			resultKey, _ := input["result_key"].(string)
-			if resultKey != "" {
-				return map[string]any{resultKey: out}, nil
-			}
-			return out, nil
-		},
+		newPBQueryFn(app),
 		workflow.ActivityMeta{
 			Category:    "PocketBase",
 			Description: "Queries a PocketBase collection with a visual filter builder",
@@ -289,43 +189,9 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 			},
 		},
 	)
-
 	// pb_create: creates a new record in a PocketBase collection.
 	eng.RegisterActivityWithMeta("pb_create",
-		func(_ context.Context, input map[string]any) (map[string]any, error) {
-			tableName, _ := input["table_name"].(string)
-			if tableName == "" {
-				return nil, fmt.Errorf("pb_create: table_name is required")
-			}
-			data, ok := input["data"].(map[string]any)
-			if !ok || data == nil {
-				return nil, fmt.Errorf("pb_create: data is required and must be an object")
-			}
-
-			col, err := app.FindCollectionByNameOrId(tableName)
-			if err != nil {
-				return nil, fmt.Errorf("pb_create: find collection %q: %w", tableName, err)
-			}
-
-			rec := core.NewRecord(col)
-			for k, v := range data {
-				rec.Set(k, v)
-			}
-
-			if err := app.Save(rec); err != nil {
-				return nil, fmt.Errorf("pb_create: save: %w", err)
-			}
-
-			recMap := make(map[string]any)
-			for _, f := range rec.Collection().Fields {
-				recMap[f.GetName()] = rec.Get(f.GetName())
-			}
-			out := map[string]any{"id": rec.Id, "record": recMap}
-			if rk, _ := input["result_key"].(string); rk != "" {
-				return map[string]any{rk: out}, nil
-			}
-			return out, nil
-		},
+		newPBCreateFn(app),
 		workflow.ActivityMeta{
 			Category:    "PocketBase",
 			Description: "Creates a new record in a PocketBase collection",
@@ -343,43 +209,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 
 	// pb_update: updates an existing record in a PocketBase collection.
 	eng.RegisterActivityWithMeta("pb_update",
-		func(_ context.Context, input map[string]any) (map[string]any, error) {
-			tableName, _ := input["table_name"].(string)
-			if tableName == "" {
-				return nil, fmt.Errorf("pb_update: table_name is required")
-			}
-			id, _ := input["id"].(string)
-			if id == "" {
-				return nil, fmt.Errorf("pb_update: id is required")
-			}
-			data, ok := input["data"].(map[string]any)
-			if !ok || data == nil {
-				return nil, fmt.Errorf("pb_update: data is required and must be an object")
-			}
-
-			rec, err := app.FindRecordById(tableName, id)
-			if err != nil {
-				return nil, fmt.Errorf("pb_update: find record %q in %q: %w", id, tableName, err)
-			}
-
-			for k, v := range data {
-				rec.Set(k, v)
-			}
-
-			if err := app.Save(rec); err != nil {
-				return nil, fmt.Errorf("pb_update: save: %w", err)
-			}
-
-			recMap := make(map[string]any)
-			for _, f := range rec.Collection().Fields {
-				recMap[f.GetName()] = rec.Get(f.GetName())
-			}
-			out := map[string]any{"id": rec.Id, "record": recMap}
-			if rk, _ := input["result_key"].(string); rk != "" {
-				return map[string]any{rk: out}, nil
-			}
-			return out, nil
-		},
+		newPBUpdateFn(app),
 		workflow.ActivityMeta{
 			Category:    "PocketBase",
 			Description: "Updates an existing record in a PocketBase collection",
@@ -398,31 +228,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 
 	// pb_delete: deletes a record from a PocketBase collection.
 	eng.RegisterActivityWithMeta("pb_delete",
-		func(_ context.Context, input map[string]any) (map[string]any, error) {
-			tableName, _ := input["table_name"].(string)
-			if tableName == "" {
-				return nil, fmt.Errorf("pb_delete: table_name is required")
-			}
-			id, _ := input["id"].(string)
-			if id == "" {
-				return nil, fmt.Errorf("pb_delete: id is required")
-			}
-
-			rec, err := app.FindRecordById(tableName, id)
-			if err != nil {
-				return nil, fmt.Errorf("pb_delete: find record %q in %q: %w", id, tableName, err)
-			}
-
-			if err := app.Delete(rec); err != nil {
-				return nil, fmt.Errorf("pb_delete: delete: %w", err)
-			}
-
-			out := map[string]any{"deleted": true, "id": id}
-			if rk, _ := input["result_key"].(string); rk != "" {
-				return map[string]any{rk: out}, nil
-			}
-			return out, nil
-		},
+		newPBDeleteFn(app),
 		workflow.ActivityMeta{
 			Category:    "PocketBase",
 			Description: "Deletes a record from a PocketBase collection",
@@ -440,114 +246,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 
 	// pb_upsert: updates a record if id is provided, creates one if not.
 	eng.RegisterActivityWithMeta("pb_upsert",
-		func(_ context.Context, input map[string]any) (map[string]any, error) {
-			tableName, _ := input["table_name"].(string)
-			if tableName == "" {
-				return nil, fmt.Errorf("pb_upsert: table_name is required")
-			}
-			data, ok := input["data"].(map[string]any)
-			if !ok || data == nil {
-				return nil, fmt.Errorf("pb_upsert: data is required and must be an object (got %T: %v)", input["data"], input["data"])
-			}
-
-			id, _ := input["id"].(string)
-
-			// Debug: log resolved input
-			dataJSON, _ := json.Marshal(data)
-			fmt.Printf("[pb_upsert] table=%q id=%q data=%s\n", tableName, id, dataJSON)
-
-			var rec *core.Record
-			// where_filters takes priority over id for finding the record.
-			whereFilters, _ := input["where_filters"].([]any)
-			if len(whereFilters) > 0 {
-				filterMode, _ := input["where_filter_mode"].(string)
-				sep := " && "
-				if filterMode == "or" {
-					sep = " || "
-				}
-				parts := []string{}
-				params := dbx.Params{}
-				for i, rf := range whereFilters {
-					rule, ok := rf.(map[string]any)
-					if !ok {
-						fmt.Printf("[pb_upsert] where_filters[%d] is not a map: %T %v\n", i, rf, rf)
-						continue
-					}
-					field, _ := rule["field"].(string)
-					operator, _ := rule["operator"].(string)
-					value := rule["value"]
-					fmt.Printf("[pb_upsert] where rule[%d]: field=%q op=%q value=%v (type %T)\n", i, field, operator, value, value)
-					if field == "" || operator == "" {
-						continue
-					}
-					key := fmt.Sprintf("v%d", i)
-					parts = append(parts, fmt.Sprintf("%s %s {:%s}", field, pbQueryOp(operator), key))
-					params[key] = value
-				}
-				if len(parts) == 0 {
-					return nil, fmt.Errorf("pb_upsert: where_filters provided but no valid rules")
-				}
-				filterStr := strings.Join(parts, sep)
-				fmt.Printf("[pb_upsert] filter=%q params=%v\n", filterStr, params)
-				col, err := app.FindCollectionByNameOrId(tableName)
-				if err != nil {
-					return nil, fmt.Errorf("pb_upsert: find collection %q: %w", tableName, err)
-				}
-				records, err := app.FindRecordsByFilter(tableName, filterStr, "", 1, 0, params)
-				if err != nil {
-					return nil, fmt.Errorf("pb_upsert: where query: %w", err)
-				}
-				fmt.Printf("[pb_upsert] found %d existing records\n", len(records))
-				if len(records) > 0 {
-					rec = records[0]
-				} else {
-					rec = core.NewRecord(col)
-				}
-			} else if id != "" {
-				// Update by id
-				existing, err := app.FindRecordById(tableName, id)
-				if err != nil {
-					return nil, fmt.Errorf("pb_upsert: find record %q in %q: %w", id, tableName, err)
-				}
-				rec = existing
-			} else {
-				// Create path
-				col, err := app.FindCollectionByNameOrId(tableName)
-				if err != nil {
-					return nil, fmt.Errorf("pb_upsert: find collection %q: %w", tableName, err)
-				}
-				rec = core.NewRecord(col)
-			}
-
-			fmt.Printf("[pb_upsert] setting %d data fields on record id=%q:\n", len(data), rec.Id)
-			for k, v := range data {
-				fmt.Printf("[pb_upsert]   data[%q] type=%T value=%#v\n", k, v, v)
-				rec.Set(k, v)
-			}
-			fmt.Printf("[pb_upsert] pre-save record fields:\n")
-			for _, f := range rec.Collection().Fields {
-				fv := rec.Get(f.GetName())
-				fmt.Printf("[pb_upsert]   field[%q] type=%T value=%#v\n", f.GetName(), fv, fv)
-			}
-			if err := app.Save(rec); err != nil {
-				// Build a detailed error showing all data field types/values so it appears in [APP] logs
-				details := make([]string, 0, len(data))
-				for k, v := range data {
-					details = append(details, fmt.Sprintf("%s=%T(%#v)", k, v, v))
-				}
-				return nil, fmt.Errorf("pb_upsert: save: %w | data: %s", err, strings.Join(details, ", "))
-			}
-
-			recMap := make(map[string]any)
-			for _, f := range rec.Collection().Fields {
-				recMap[f.GetName()] = rec.Get(f.GetName())
-			}
-			out := map[string]any{"id": rec.Id, "created": id == "", "record": recMap}
-			if rk, _ := input["result_key"].(string); rk != "" {
-				return map[string]any{rk: out}, nil
-			}
-			return out, nil
-		},
+		newPBUpsertFn(app),
 		workflow.ActivityMeta{
 			Category:    "PocketBase",
 			Description: "Updates an existing record if id is supplied, otherwise creates a new one",
@@ -1749,61 +1448,65 @@ func registerTextSubstitute(eng *workflow.Engine) {
 	)
 }
 
-func registerFormatDate(eng *workflow.Engine) {
-	parsLayouts := []string{
-		"2006-01-02 15:04:05.000Z",
-		"2006-01-02 15:04:05.999Z07:00",
-		"2006-01-02 15:04:05Z07:00",
-		"2006-01-02 15:04:05",
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05.000Z",
-		"2006-01-02",
-		"01/02/2006",
-		"January 2, 2006",
+var formatDateParsLayouts = []string{
+	"2006-01-02 15:04:05.000Z",
+	"2006-01-02 15:04:05.999Z07:00",
+	"2006-01-02 15:04:05Z07:00",
+	"2006-01-02 15:04:05",
+	time.RFC3339Nano,
+	time.RFC3339,
+	"2006-01-02T15:04:05.000Z",
+	"2006-01-02",
+	"01/02/2006",
+	"January 2, 2006",
+}
+
+func newFormatDateFn() workflow.ActivityFunc {
+	return func(_ context.Context, input map[string]any) (map[string]any, error) {
+		keyName, _ := input["value"].(string)
+		if keyName == "" {
+			return nil, fmt.Errorf("format_date: value (context key) is required")
+		}
+		format, _ := input["format"].(string)
+		if format == "" {
+			return nil, fmt.Errorf("format_date: format is required")
+		}
+
+		// Resolve the value via dot-path traversal (e.g. "pb_contact.records.0.birthday").
+		raw := resolveNestedInput(input, keyName)
+
+		var t time.Time
+		switch v := raw.(type) {
+		case time.Time:
+			t = v
+		case string:
+			if v == "" {
+				return nil, fmt.Errorf("format_date: context key %q is empty", keyName)
+			}
+			var parseErr error
+			for _, layout := range formatDateParsLayouts {
+				t, parseErr = time.Parse(layout, v)
+				if parseErr == nil {
+					break
+				}
+			}
+			if parseErr != nil {
+				return nil, fmt.Errorf("format_date: could not parse %q as a date", v)
+			}
+		default:
+			return nil, fmt.Errorf("format_date: context key %q is not a string or time.Time (got %T)", keyName, raw)
+		}
+
+		setNestedInput(input, keyName, t.Format(format))
+		// Return the top-level key so the engine merges the mutated structure back.
+		topKey := strings.SplitN(keyName, ".", 2)[0]
+		return map[string]any{topKey: input[topKey]}, nil
 	}
+}
 
+func registerFormatDate(eng *workflow.Engine) {
 	eng.RegisterActivityWithMeta("format_date",
-		func(_ context.Context, input map[string]any) (map[string]any, error) {
-			keyName, _ := input["value"].(string)
-			if keyName == "" {
-				return nil, fmt.Errorf("format_date: value (context key) is required")
-			}
-			format, _ := input["format"].(string)
-			if format == "" {
-				return nil, fmt.Errorf("format_date: format is required")
-			}
-
-			// Resolve the value via dot-path traversal (e.g. "pb_contact.records.0.birthday").
-			raw := resolveNestedInput(input, keyName)
-
-			var t time.Time
-			switch v := raw.(type) {
-			case time.Time:
-				t = v
-			case string:
-				if v == "" {
-					return nil, fmt.Errorf("format_date: context key %q is empty", keyName)
-				}
-				var parseErr error
-				for _, layout := range parsLayouts {
-					t, parseErr = time.Parse(layout, v)
-					if parseErr == nil {
-						break
-					}
-				}
-				if parseErr != nil {
-					return nil, fmt.Errorf("format_date: could not parse %q as a date", v)
-				}
-			default:
-				return nil, fmt.Errorf("format_date: context key %q is not a string or time.Time (got %T)", keyName, raw)
-			}
-
-			setNestedInput(input, keyName, t.Format(format))
-			// Return the top-level key so the engine merges the mutated structure back.
-			topKey := strings.SplitN(keyName, ".", 2)[0]
-			return map[string]any{topKey: input[topKey]}, nil
-		},
+		newFormatDateFn(),
 		workflow.ActivityMeta{
 			Category:    "Utility",
 			Description: "Parses a date string from a context key and reformats it in-place using a Go layout string.",

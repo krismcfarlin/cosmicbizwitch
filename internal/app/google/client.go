@@ -12,6 +12,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // Client makes authenticated requests to Google Drive and Docs APIs.
@@ -635,6 +636,113 @@ func (c *Client) UploadRawFile(ctx context.Context, content []byte, filename, mi
 		MimeType:    mimeType,
 		WebViewLink: result.WebViewLink,
 	}, nil
+}
+
+// GetDocImages returns a map of alt-text-description → inline-object-ID
+// for every inline image in the document. Use this to find placeholder images
+// by their alt text so they can be swapped out with ReplaceImages.
+func (c *Client) GetDocImages(ctx context.Context, docID string) (map[string]string, error) {
+	u := "https://docs.googleapis.com/v1/documents/" + url.PathEscape(docID)
+	body, err := c.doRequest(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("GetDocImages: fetch document: %w", err)
+	}
+
+	var doc struct {
+		InlineObjects map[string]struct {
+			InlineObjectProperties struct {
+				EmbeddedObject struct {
+					Description string `json:"description"`
+				} `json:"embeddedObject"`
+			} `json:"inlineObjectProperties"`
+		} `json:"inlineObjects"`
+	}
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("GetDocImages: parse response: %w", err)
+	}
+
+	result := make(map[string]string, len(doc.InlineObjects))
+	for objectID, obj := range doc.InlineObjects {
+		desc := obj.InlineObjectProperties.EmbeddedObject.Description
+		if desc == "" {
+			continue
+		}
+		// Strip {{...}} wrapper so callers use plain keys like "chart_url"
+		if strings.HasPrefix(desc, "{{") && strings.HasSuffix(desc, "}}") {
+			desc = desc[2 : len(desc)-2]
+		}
+		result[desc] = objectID
+	}
+	return result, nil
+}
+
+// ReplaceImages replaces inline images in the document whose alt-text description
+// matches a key in imageVars. The value is the public URL of the replacement image.
+// Returns the number of images successfully replaced.
+func (c *Client) ReplaceImages(ctx context.Context, docID string, imageVars map[string]string) (int, error) {
+	altTextToObjectID, err := c.GetDocImages(ctx, docID)
+	if err != nil {
+		return 0, fmt.Errorf("ReplaceImages: %w", err)
+	}
+	if len(altTextToObjectID) == 0 {
+		return 0, nil
+	}
+
+	type replaceImage struct {
+		ImageObjectId      string `json:"imageObjectId"`
+		URI                string `json:"uri"`
+		ImageReplaceMethod string `json:"imageReplaceMethod"`
+	}
+	type request struct {
+		ReplaceImage replaceImage `json:"replaceImage"`
+	}
+
+	requests := make([]request, 0, len(imageVars))
+	for key, imageURL := range imageVars {
+		objectID, ok := altTextToObjectID[key]
+		if !ok {
+			continue
+		}
+		requests = append(requests, request{
+			ReplaceImage: replaceImage{
+				ImageObjectId:      objectID,
+				URI:                imageURL,
+				ImageReplaceMethod: "CENTER_CROP",
+			},
+		})
+	}
+
+	if len(requests) == 0 {
+		return 0, nil
+	}
+
+	payload := map[string]any{"requests": requests}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+
+	u := "https://docs.googleapis.com/v1/documents/" + url.PathEscape(docID) + ":batchUpdate"
+	_, err = c.doRequest(ctx, http.MethodPost, u, data)
+	if err != nil {
+		return 0, fmt.Errorf("ReplaceImages: batchUpdate: %w", err)
+	}
+
+	return len(requests), nil
+}
+
+// TokenExpiry returns when the current access token expires.
+func (c *Client) TokenExpiry() (time.Time, error) {
+	return c.tm.TokenExpiry()
+}
+
+// EnsureTokenFresh proactively fetches a valid access token, triggering a
+// refresh if the current one is expired or close to expiry. Call this from a
+// background goroutine to keep tokens warm and catch rotation/expiry early
+// before a user-facing request is affected.
+func (c *Client) EnsureTokenFresh() error {
+	_, err := c.tm.GetAccessToken()
+	return err
 }
 
 // doRequest performs an authenticated HTTP request and returns the response body.

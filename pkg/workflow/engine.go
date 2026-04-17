@@ -58,10 +58,11 @@ type Engine struct {
 	subMu       sync.Mutex
 	subscribers map[chan Event]struct{}
 
-	logger       *log.Logger
-	pollInterval time.Duration
-	stopCh       chan struct{}
-	wg           sync.WaitGroup
+	logger           *log.Logger
+	pollInterval     time.Duration
+	onWorkflowFailed func(wf *Workflow, reason string)
+	stopCh           chan struct{}
+	wg               sync.WaitGroup
 }
 
 // HumanSignal carries the trigger payload for human-in-the-middle nodes.
@@ -71,8 +72,9 @@ type HumanSignal struct {
 
 // EngineConfig holds optional configuration for the Engine.
 type EngineConfig struct {
-	PollInterval time.Duration // default 5s
-	Logger       *log.Logger
+	PollInterval     time.Duration // default 5s
+	Logger           *log.Logger
+	OnWorkflowFailed func(wf *Workflow, reason string) // called in a goroutine when any workflow fails
 }
 
 // NewEngine creates a new Engine. Call RegisterActivity/RegisterGraph before Start.
@@ -84,15 +86,16 @@ func NewEngine(store Store, cfg EngineConfig) *Engine {
 		cfg.Logger = log.Default()
 	}
 	return &Engine{
-		store:        store,
-		registry:     make(map[string]ActivityFunc),
-		activityMeta: make(map[string]ActivityMeta),
-		graphs:       make(map[string]*ActivityGraph),
-		running:      make(map[string]context.CancelFunc),
-		subscribers:  make(map[chan Event]struct{}),
-		logger:       cfg.Logger,
-		pollInterval: cfg.PollInterval,
-		stopCh:       make(chan struct{}),
+		store:            store,
+		registry:         make(map[string]ActivityFunc),
+		activityMeta:     make(map[string]ActivityMeta),
+		graphs:           make(map[string]*ActivityGraph),
+		running:          make(map[string]context.CancelFunc),
+		subscribers:      make(map[chan Event]struct{}),
+		logger:           cfg.Logger,
+		pollInterval:     cfg.PollInterval,
+		onWorkflowFailed: cfg.OnWorkflowFailed,
+		stopCh:           make(chan struct{}),
 	}
 }
 
@@ -410,6 +413,14 @@ func (e *Engine) ExecuteActivity(ctx context.Context, name string, input map[str
 		return nil, fmt.Errorf("activity %q not registered", name)
 	}
 	return fn(ctx, input)
+}
+
+// HasActivity reports whether an activity with the given name is registered.
+func (e *Engine) HasActivity(name string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, ok := e.registry[name]
+	return ok
 }
 
 // ListGraphs returns all registered graph names.

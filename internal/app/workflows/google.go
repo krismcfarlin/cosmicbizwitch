@@ -160,37 +160,9 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			fmt.Printf("[gdrive_fill_template] Created new document: %s\n", docID)
 
 			// Build the replacement map.
-			vars := make(map[string]string)
-
-			varsRaw := gdriveString(input, "vars")
-			if varsRaw != "" {
-				// User provided explicit JSON overrides (string form).
-				if err := json.Unmarshal([]byte(varsRaw), &vars); err != nil {
-					return nil, fmt.Errorf("gdrive_fill_template: vars is not valid JSON: %w", err)
-				}
-			} else if varsMap, ok := input["vars"].(map[string]any); ok {
-				// execute-node debug panel coerces JSON strings to native maps — handle that here.
-				for k, v := range varsMap {
-					if s, ok := v.(string); ok {
-						vars[k] = s
-					}
-				}
-			} else {
-				// Use all string-valued keys from the workflow context, excluding internals.
-				skip := map[string]bool{
-					"template_id": true, "destination_folder_id": true, "title": true, "vars": true,
-				}
-				for k, v := range input {
-					if len(k) > 0 && k[0] == '_' {
-						continue // skip _source, _trigger, etc.
-					}
-					if skip[k] {
-						continue
-					}
-					if s, ok := v.(string); ok {
-						vars[k] = s
-					}
-				}
+			vars, err := buildFillTemplateVars(input)
+			if err != nil {
+				return nil, fmt.Errorf("gdrive_fill_template: %w", err)
 			}
 
 			fmt.Printf("[gdrive_fill_template] Replacing %d variables in document\n", len(vars))
@@ -202,11 +174,43 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 				return nil, fmt.Errorf("gdrive_fill_template: fill template: %w", err)
 			}
 			fmt.Printf("[gdrive_fill_template] Completed - %d replacements made\n", count)
+
+			// Process image_vars if provided.
+			imagesReplaced := 0
+			if rawImageVars := input["image_vars"]; rawImageVars != nil {
+				var imageVars map[string]string
+				switch iv := rawImageVars.(type) {
+				case map[string]any:
+					imageVars = make(map[string]string, len(iv))
+					for k, v := range iv {
+						if s, ok := v.(string); ok {
+							imageVars[k] = s
+						}
+					}
+				case string:
+					if iv != "" {
+						var parsed map[string]string
+						if err := json.Unmarshal([]byte(iv), &parsed); err == nil {
+							imageVars = parsed
+						}
+					}
+				}
+				if len(imageVars) > 0 {
+					n, err := gc.ReplaceImages(ctx, docID, imageVars)
+					if err != nil {
+						log.Printf("[gdrive_fill_template] image replacement failed: %v", err)
+					} else {
+						imagesReplaced = n
+						fmt.Printf("[gdrive_fill_template] Replaced %d images\n", n)
+					}
+				}
+			}
 			return map[string]any{
 				"doc_id":            docID,
 				"doc_url":           webURL,
 				"doc_title":         title,
 				"replacements_made": count,
+				"images_replaced":   imagesReplaced,
 			}, nil
 		},
 		workflow.ActivityMeta{
@@ -217,12 +221,14 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 				{Name: "destination_folder_id", Type: "gdrive_folder", Required: true, Description: "Drive folder for the copy — use Browse to pick."},
 				{Name: "title", Type: "string", Description: "Name for the new document. Supports {{key}} interpolation. Defaults to the original document name."},
 				{Name: "vars", Type: "json", Description: "JSON object mapping placeholder name to value. Engine interpolates {{ctx_key}} inside this string."},
+					{Name: "image_vars", Type: "json", Description: "JSON object mapping alt-text key to image URL. In the template doc, set each placeholder image's alt text to the key name. The node replaces those images with the resolved URLs. Example: {\"chart_url\": \"{{chart_url}}\"}"},
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "doc_id", Type: "string", Description: "Drive ID of the new document copy."},
 				{Name: "doc_url", Type: "string", Description: "Web view URL of the new document."},
 				{Name: "doc_title", Type: "string", Description: "Title used for the new document."},
 				{Name: "replacements_made", Type: "number", Description: "Total number of placeholder occurrences replaced."},
+				{Name: "images_replaced", Type: "number", Description: "Number of placeholder images replaced."},
 			},
 		},
 	)
@@ -670,10 +676,9 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			}
 			if makePublic {
 				if err := gc.MakePublic(ctx, f.ID); err != nil {
-					log.Printf("[gdrive_fetch_url] make public failed: %v", err)
-				} else {
-					out["public_url"] = "https://drive.google.com/uc?id=" + f.ID
+					return nil, fmt.Errorf("gdrive_fetch_url: make public failed: %w", err)
 				}
+				out["public_url"] = "https://drive.google.com/uc?id=" + f.ID
 			}
 
 			return out, nil
@@ -708,6 +713,52 @@ func registerGoogleActivities(eng *workflow.Engine, getGoogle func() *googleapp.
 			},
 		},
 	)
+}
+
+// buildFillTemplateVars builds the {{placeholder}} → value map for gdrive_fill_template.
+//
+// Priority:
+//  1. "vars" is a JSON string  → unmarshal it
+//  2. "vars" is already a map  → use it (debug panel coerces JSON to map)
+//  3. no "vars"                → scan all top-level string keys from context
+//     (skips _* internals and the four reserved node input keys)
+func buildFillTemplateVars(input map[string]any) (map[string]string, error) {
+	vars := make(map[string]string)
+
+	varsRaw := gdriveString(input, "vars")
+	if varsRaw != "" {
+		if err := json.Unmarshal([]byte(varsRaw), &vars); err != nil {
+			return nil, fmt.Errorf("vars is not valid JSON: %w", err)
+		}
+		return vars, nil
+	}
+
+	if varsMap, ok := input["vars"].(map[string]any); ok {
+		for k, v := range varsMap {
+			if s, ok := v.(string); ok {
+				vars[k] = s
+			}
+		}
+		return vars, nil
+	}
+
+	// Auto-scan: only top-level string values are picked up.
+	// Nested objects (e.g. pb_birth_chart_records.chart_url) are NOT included.
+	skip := map[string]bool{
+		"template_id": true, "destination_folder_id": true, "title": true, "vars": true,
+	}
+	for k, v := range input {
+		if len(k) > 0 && k[0] == '_' {
+			continue
+		}
+		if skip[k] {
+			continue
+		}
+		if s, ok := v.(string); ok {
+			vars[k] = s
+		}
+	}
+	return vars, nil
 }
 
 // gdriveString extracts a string value from the activity input map.

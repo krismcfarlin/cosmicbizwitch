@@ -242,6 +242,7 @@ export default function WorkflowDetail() {
   const [restarting, setRestarting] = useState(false)
   const [pyodidePanel, setPyodidePanel] = useState<{ code: string; input: Record<string, unknown>; nodeId: string } | null>(null)
   const [curlModal, setCurlModal] = useState<string | null>(null)
+  const [deleteModal, setDeleteModal] = useState(false)
 
   const load = async () => {
     const res = await fetch(`/api/workflows/${id}`)
@@ -323,6 +324,11 @@ export default function WorkflowDetail() {
     setTriggerModal(false)
   }
 
+  const deleteWorkflow = async () => {
+    await fetch(`/api/workflows/${id}`, { method: 'DELETE' })
+    navigate('/workflows')
+  }
+
   const toggleExpand = (actId: string) => {
     setExpanded(prev => {
       const next = new Set(prev)
@@ -346,6 +352,7 @@ export default function WorkflowDetail() {
             <span style={{ fontSize: '12px', color: '#888', fontFamily: 'monospace' }}>{workflow.graph_name}</span>
           </div>
           <Badge status={workflow.status} />
+          <button onClick={() => navigate('/workflows/builder?graph=' + encodeURIComponent(workflow.graph_name))} style={{ background: '#f0f4ff', border: '1px solid #c7d2fe', color: '#667eea', fontSize: '12px', fontWeight: 600, padding: '4px 10px', borderRadius: '6px', cursor: 'pointer' }}>Edit</button>
         </div>
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           {workflow.status === 'paused' && (
@@ -359,6 +366,7 @@ export default function WorkflowDetail() {
               {restarting ? 'Restarting...' : 'Restart'}
             </button>
           )}
+          <button onClick={() => setDeleteModal(true)} style={btn('#c0392b')}>Delete</button>
         </div>
       </header>
 
@@ -485,6 +493,29 @@ export default function WorkflowDetail() {
       {/* Curl modal */}
       {curlModal !== null && (
         <CurlModal curlCommand={curlModal} onClose={() => setCurlModal(null)} />
+      )}
+
+      {/* Delete confirmation modal */}
+      {deleteModal && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div style={{ background: 'white', borderRadius: '8px', padding: '28px', width: '400px', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+            <div style={{ fontSize: '32px', textAlign: 'center', marginBottom: '12px' }}>⚠️</div>
+            <h3 style={{ margin: '0 0 10px', color: '#c0392b', textAlign: 'center' }}>Delete Workflow?</h3>
+            <p style={{ fontSize: '13px', color: '#555', margin: '0 0 6px', textAlign: 'center' }}>
+              This will permanently delete workflow
+            </p>
+            <p style={{ fontSize: '13px', fontFamily: 'monospace', color: '#2c3e50', textAlign: 'center', margin: '0 0 6px', fontWeight: 600 }}>
+              {workflow.name || workflow.id}
+            </p>
+            <p style={{ fontSize: '13px', color: '#555', margin: '0 0 20px', textAlign: 'center' }}>
+              and all its activity history. <strong>This cannot be undone.</strong>
+            </p>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+              <button onClick={() => setDeleteModal(false)} style={{ padding: '8px 20px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>Cancel</button>
+              <button onClick={deleteWorkflow} style={{ ...btn('#c0392b'), border: 'none', cursor: 'pointer' }}>Delete Permanently</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Trigger modal */}

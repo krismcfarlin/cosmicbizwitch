@@ -18,6 +18,11 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 )
 
+// These vars can be overridden in tests to point at httptest servers.
+var anthropicAPIURL = "https://api.anthropic.com/v1/messages"
+var openRouterAPIURL = "https://openrouter.ai/api/v1/chat/completions"
+var openAIAPIURL = "https://api.openai.com/v1/chat/completions"
+
 func registerLLMActivity(eng *workflow.Engine, app core.App, logger *log.Logger) {
 	eng.RegisterActivityWithMeta("llm_prompt",
 		func(_ context.Context, input map[string]any) (map[string]any, error) {
@@ -182,7 +187,7 @@ func callAnthropic(apiKey, model, system, prompt string, temperature float64, ma
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(data))
+	req, err := http.NewRequest("POST", anthropicAPIURL, bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
@@ -247,7 +252,7 @@ func callOpenRouter(apiKey, model, system, prompt string, temperature float64, m
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://openrouter.ai/api/v1/chat/completions", bytes.NewReader(data))
+	req, err := http.NewRequest("POST", openRouterAPIURL, bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
@@ -310,7 +315,7 @@ func callOpenAI(apiKey, model, system, prompt string, temperature float64, maxTo
 		return "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", bytes.NewReader(data))
+	req, err := http.NewRequest("POST", openAIAPIURL, bytes.NewReader(data))
 	if err != nil {
 		return "", err
 	}
@@ -506,4 +511,113 @@ func llmStringSlice(input map[string]any, key string) []string {
 		return result
 	}
 	return nil
+}
+
+// newLLMPromptFn returns a testable ActivityFunc for llm_prompt.
+func newLLMPromptFn(app core.App, logger *log.Logger) workflow.ActivityFunc {
+	return func(_ context.Context, input map[string]any) (map[string]any, error) {
+		model := llmString(input, "model")
+		if model == "" {
+			return nil, fmt.Errorf("llm_prompt: model field is required")
+		}
+		prompt := llmString(input, "prompt")
+		if prompt == "" {
+			return nil, fmt.Errorf("llm_prompt: prompt field is required")
+		}
+
+		systemPrompt := llmString(input, "system_prompt")
+		temperature := llmFloat(input, "temperature", 0.7)
+		maxTokens := llmInt(input, "max_tokens", 1024)
+		resultKey := llmString(input, "result_key")
+		if resultKey == "" {
+			resultKey = "llm_response"
+		}
+
+		promptVars := llmStringMap(input, "prompt_vars")
+
+		escapedPlaceholder := regexp.MustCompile(`\{\{([^}]+)\}\}`)
+		prompt = escapedPlaceholder.ReplaceAllStringFunc(prompt, func(match string) string {
+			inner := match[2 : len(match)-2]
+			return "{{" + strings.ReplaceAll(inner, `\_`, "_") + "}}"
+		})
+		systemPrompt = escapedPlaceholder.ReplaceAllStringFunc(systemPrompt, func(match string) string {
+			inner := match[2 : len(match)-2]
+			return "{{" + strings.ReplaceAll(inner, `\_`, "_") + "}}"
+		})
+
+		for k, v := range promptVars {
+			prompt = strings.ReplaceAll(prompt, "{{"+k+"}}", v)
+			systemPrompt = strings.ReplaceAll(systemPrompt, "{{"+k+"}}", v)
+		}
+
+		jsonFields := llmStringSlice(input, "json_output_fields")
+		if len(jsonFields) > 0 {
+			schemaBytes, _ := json.Marshal(jsonFields)
+			prompt += "\n\nPlease respond with your analysis directly in JSON format without using Markdown code blocks or any other formatting. Use the following json fields in the response " + string(schemaBytes)
+		}
+
+		if len(promptVars) > 0 {
+			varsBytes, _ := json.Marshal(promptVars)
+			logger.Printf("[llm_prompt] prompt_vars: %s", varsBytes)
+		}
+		if systemPrompt != "" {
+			logger.Printf("[llm_prompt] system_prompt (model=%s):\n%s", model, systemPrompt)
+		}
+		logger.Printf("[llm_prompt] generated prompt (model=%s):\n%s", model, prompt)
+
+		var responseText string
+		var err error
+
+		switch {
+		case strings.HasPrefix(model, "anthropic/"):
+			apiKey := llmGetSetting(app, "ANTHROPIC_API_KEY")
+			if apiKey == "" {
+				return nil, fmt.Errorf("llm_prompt: ANTHROPIC_API_KEY not configured in settings")
+			}
+			modelID := strings.TrimPrefix(model, "anthropic/")
+			if modelID == "claude-haiku-4-5" {
+				modelID = "claude-haiku-4-5-20251001"
+			}
+			responseText, err = callAnthropic(apiKey, modelID, systemPrompt, prompt, temperature, maxTokens)
+
+		case strings.HasPrefix(model, "openrouter/"):
+			keyName := llmString(input, "api_key_name")
+			apiKey := llmGetOpenRouterKey(app, keyName)
+			if apiKey == "" {
+				return nil, fmt.Errorf("llm_prompt: no OpenRouter API key configured (set OPENROUTER_KEYS or OPENROUTER_API_KEY in Settings)")
+			}
+			modelID := strings.TrimPrefix(model, "openrouter/")
+			responseText, err = callOpenRouter(apiKey, modelID, systemPrompt, prompt, temperature, maxTokens)
+
+		case strings.HasPrefix(model, "openai/"):
+			apiKey := llmGetSetting(app, "OPENAI_API_KEY")
+			if apiKey == "" {
+				return nil, fmt.Errorf("llm_prompt: OPENAI_API_KEY not configured in settings")
+			}
+			modelID := strings.TrimPrefix(model, "openai/")
+			responseText, err = callOpenAI(apiKey, modelID, systemPrompt, prompt, temperature, maxTokens)
+
+		default:
+			return nil, fmt.Errorf("llm_prompt: unknown provider for model %q — prefix with 'anthropic/', 'openai/', or 'openrouter/'", model)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("llm_prompt: %w", err)
+		}
+
+		parsedResult := extractJSON(responseText)
+		out := map[string]any{resultKey: parsedResult}
+
+		if len(jsonFields) > 0 {
+			if parsed, ok := parsedResult.(map[string]any); ok {
+				for _, f := range jsonFields {
+					if v, ok := parsed[f]; ok {
+						out[f] = v
+					}
+				}
+			}
+		}
+
+		return out, nil
+	}
 }
