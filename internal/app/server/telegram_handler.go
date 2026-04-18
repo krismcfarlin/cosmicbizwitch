@@ -56,7 +56,67 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 				Type  string `json:"type"`
 				Title string `json:"title"`
 			} `json:"chat"`
-			Text  string `json:"text"`
+			Text            string `json:"text"`
+			Caption         string `json:"caption"`
+			Date            int64  `json:"date"`
+			MessageThreadID int64  `json:"message_thread_id"`
+			Photo           []struct {
+				FileID   string `json:"file_id"`
+				Width    int    `json:"width"`
+				Height   int    `json:"height"`
+				FileSize int    `json:"file_size"`
+			} `json:"photo"`
+			Sticker *struct {
+				FileID   string `json:"file_id"`
+				Emoji    string `json:"emoji"`
+				SetName  string `json:"set_name"`
+				IsAnimated bool `json:"is_animated"`
+			} `json:"sticker"`
+			Location *struct {
+				Latitude  float64 `json:"latitude"`
+				Longitude float64 `json:"longitude"`
+			} `json:"location"`
+			Contact *struct {
+				PhoneNumber string `json:"phone_number"`
+				FirstName   string `json:"first_name"`
+				LastName    string `json:"last_name"`
+				UserID      int64  `json:"user_id"`
+			} `json:"contact"`
+			VideoNote *struct {
+				FileID   string `json:"file_id"`
+				Duration int    `json:"duration"`
+				Length   int    `json:"length"`
+			} `json:"video_note"`
+			Animation *struct {
+				FileID   string `json:"file_id"`
+				Duration int    `json:"duration"`
+				Width    int    `json:"width"`
+				Height   int    `json:"height"`
+				FileName string `json:"file_name"`
+				MimeType string `json:"mime_type"`
+			} `json:"animation"`
+			ReplyToMessage *struct {
+				MessageID int64  `json:"message_id"`
+				Text      string `json:"text"`
+				Caption   string `json:"caption"`
+				From      *struct {
+					ID        int64  `json:"id"`
+					Username  string `json:"username"`
+					FirstName string `json:"first_name"`
+				} `json:"from"`
+			} `json:"reply_to_message"`
+			ForwardFrom *struct {
+				ID        int64  `json:"id"`
+				Username  string `json:"username"`
+				FirstName string `json:"first_name"`
+			} `json:"forward_from"`
+			ForwardDate int64 `json:"forward_date"`
+			Entities    []struct {
+				Type   string `json:"type"`
+				Offset int    `json:"offset"`
+				Length int    `json:"length"`
+				URL    string `json:"url"`
+			} `json:"entities"`
 			Voice *struct {
 				FileID   string `json:"file_id"`
 				Duration int    `json:"duration"`
@@ -164,15 +224,21 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 		firstName = msg.From.FirstName
 	}
 
+	text := msg.Text
+	if text == "" {
+		text = msg.Caption
+	}
 	payload := map[string]any{
-		"chat_id":      msg.Chat.ID,
-		"user_id":      userID,
-		"username":     username,
-		"first_name":   firstName,
-		"text":         msg.Text,
-		"message_id":   msg.MessageID,
-		"chat_type":    msg.Chat.Type,
-		"message_type": "text",
+		"chat_id":           msg.Chat.ID,
+		"user_id":           userID,
+		"username":          username,
+		"first_name":        firstName,
+		"text":              text,
+		"message_id":        msg.MessageID,
+		"message_thread_id": msg.MessageThreadID,
+		"chat_type":         msg.Chat.Type,
+		"message_type":      "text",
+		"date":              msg.Date,
 	}
 
 	// voice message
@@ -197,12 +263,77 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 		payload["document_mime_type"] = msg.Document.MimeType
 		payload["message_type"] = "document"
 	}
+	// photo — use largest size (last element)
+	if len(msg.Photo) > 0 {
+		largest := msg.Photo[len(msg.Photo)-1]
+		payload["photo_file_id"] = largest.FileID
+		payload["photo_width"] = largest.Width
+		payload["photo_height"] = largest.Height
+		payload["message_type"] = "photo"
+	}
 	// video
 	if msg.Video != nil {
 		payload["video_file_id"] = msg.Video.FileID
 		payload["video_duration"] = msg.Video.Duration
 		payload["video_mime_type"] = msg.Video.MimeType
 		payload["message_type"] = "video"
+	}
+	// sticker
+	if msg.Sticker != nil {
+		payload["sticker_file_id"] = msg.Sticker.FileID
+		payload["sticker_emoji"] = msg.Sticker.Emoji
+		payload["sticker_set_name"] = msg.Sticker.SetName
+		payload["message_type"] = "sticker"
+	}
+	// location
+	if msg.Location != nil {
+		payload["location_latitude"] = msg.Location.Latitude
+		payload["location_longitude"] = msg.Location.Longitude
+		payload["message_type"] = "location"
+	}
+	// contact
+	if msg.Contact != nil {
+		payload["contact_phone"] = msg.Contact.PhoneNumber
+		payload["contact_first_name"] = msg.Contact.FirstName
+		payload["contact_last_name"] = msg.Contact.LastName
+		payload["contact_user_id"] = msg.Contact.UserID
+		payload["message_type"] = "contact"
+	}
+	// video note (round video)
+	if msg.VideoNote != nil {
+		payload["video_note_file_id"] = msg.VideoNote.FileID
+		payload["video_note_duration"] = msg.VideoNote.Duration
+		payload["message_type"] = "video_note"
+	}
+	// animation (GIF)
+	if msg.Animation != nil {
+		payload["animation_file_id"] = msg.Animation.FileID
+		payload["animation_duration"] = msg.Animation.Duration
+		payload["animation_mime_type"] = msg.Animation.MimeType
+		payload["message_type"] = "animation"
+	}
+	// reply context
+	if msg.ReplyToMessage != nil {
+		replyText := msg.ReplyToMessage.Text
+		if replyText == "" {
+			replyText = msg.ReplyToMessage.Caption
+		}
+		payload["reply_to_message_id"] = msg.ReplyToMessage.MessageID
+		payload["reply_to_text"] = replyText
+		if msg.ReplyToMessage.From != nil {
+			payload["reply_to_username"] = msg.ReplyToMessage.From.Username
+			payload["reply_to_user_id"] = msg.ReplyToMessage.From.ID
+		}
+	}
+	// forward origin
+	if msg.ForwardFrom != nil {
+		payload["forward_from_user_id"] = msg.ForwardFrom.ID
+		payload["forward_from_username"] = msg.ForwardFrom.Username
+		payload["forward_date"] = msg.ForwardDate
+	}
+	// entities (URLs, mentions, hashtags)
+	if len(msg.Entities) > 0 {
+		payload["entities"] = msg.Entities
 	}
 
 	// Also inject the full raw Telegram update as a nested "message" key so that
