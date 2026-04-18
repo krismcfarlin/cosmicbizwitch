@@ -7,11 +7,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-
 	"strings"
+	"time"
 
 	"cosmicbizwitch/internal/app/server"
 	"cosmicbizwitch/internal/app/storage"
+	telegramapp "cosmicbizwitch/internal/app/telegram"
 	"cosmicbizwitch/internal/app/triggers"
 	appworkflows "cosmicbizwitch/internal/app/workflows"
 	"cosmicbizwitch/pkg/workflow"
@@ -93,7 +94,21 @@ func main() {
 			}
 
 			// Workflow engine
-			eng := workflow.NewEngine(pbstore.New(e.App), workflow.EngineConfig{Logger: logger})
+			eng := workflow.NewEngine(pbstore.New(e.App), workflow.EngineConfig{
+				Logger: logger,
+				OnWorkflowFailed: func(wf *workflow.Workflow, reason string) {
+					tc := settingsMgr.TelegramClient()
+					if tc == nil {
+						return
+					}
+					msg := fmt.Sprintf("❌ Workflow failed\n\nName: %s\nGraph: %s\nReason: %s\n\nhttps://server.cosmicbizwitch.com/workflows/%s", wf.Name, wf.GraphName, reason, wf.ID)
+					_ = tc.SendMessage(telegramapp.SendMessageParams{
+						ChatID:          -1003039609007,
+						MessageThreadID: 1497,
+						Text:            msg,
+					})
+				},
+			})
 
 			// Register default demo activities and graphs
 			if err := appworkflows.RegisterDefaults(eng, e.App, settingsMgr.CFClient, settingsMgr.GoogleClient, settingsMgr.SlackClient, settingsMgr.TelegramClient); err != nil {
@@ -131,6 +146,32 @@ func main() {
 				ourHandler.ServeHTTP(re.Response, re.Request)
 				return nil
 			})
+
+			// Proactive Google token refresh — runs every 45 minutes so tokens stay
+			// warm and any refresh-token rotation is detected and persisted before a
+			// user-facing workflow hits an expired token.
+			go func() {
+				ticker := time.NewTicker(45 * time.Minute)
+				defer ticker.Stop()
+				for range ticker.C {
+					gc := settingsMgr.GoogleClient()
+					if gc == nil {
+						continue
+					}
+					if err := gc.EnsureTokenFresh(); err != nil {
+						logger.Printf("[google] proactive token refresh FAILED — re-auth may be needed: %v", err)
+						if tc := settingsMgr.TelegramClient(); tc != nil {
+							chatIDStr := settingsMgr.Get("TELEGRAM_ADMIN_CHAT_ID")
+							var chatID int64
+							fmt.Sscanf(chatIDStr, "%d", &chatID)
+							if chatID != 0 {
+								msg := fmt.Sprintf("⚠️ Google Drive auth FAILED — workflows will break.\n\nRe-auth: https://server.cosmicbizwitch.com/api/google/auth/start\n\nError: %v", err)
+								_ = tc.SendMessage(telegramapp.SendMessageParams{ChatID: chatID, Text: msg})
+							}
+						}
+					}
+				}
+			}()
 
 			logger.Printf("Application started successfully")
 			logger.Printf("HTTP server listening on http://localhost:%d", port)

@@ -391,6 +391,9 @@ func (e *Engine) failWorkflow(ctx context.Context, wf *Workflow, reason string) 
 	wf.UpdatedAt = now
 	_ = e.store.UpdateWorkflow(ctx, wf)
 	e.broadcast(Event{Type: "workflow_update", Workflow: wf})
+	if e.onWorkflowFailed != nil {
+		go e.onWorkflowFailed(wf, reason)
+	}
 }
 
 // completeWorkflow marks a workflow as successfully completed.
@@ -864,9 +867,19 @@ func interpolateCtx(s string, ctx map[string]any) string {
 // resolveCtxKey resolves a single key (supports dot notation and array indices) from ctx.
 // Returns empty string if not found.
 // Examples: "geocode.0.lat", "results.items.0.name"
-// fmtVal converts any value to its string representation for template substitution.
-// float64 values that are whole integers are formatted without scientific notation
-// (e.g. 433619309 not 4.33619309e+08), which is critical for IDs and timestamps.
+// FmtVal converts any value to its string representation for use at system
+// boundaries (database params, template output). float64 whole integers are
+// formatted without scientific notation (e.g. 433619309, not 4.33619309e+08),
+// which is critical for IDs and timestamps stored as TEXT in SQLite.
+//
+// Use this in activity nodes when binding a deepInterpolate result to a SQL
+// parameter or any context that expects a string — it prevents the common bug
+// where a JSON number (float64) doesn't match a TEXT column in SQLite.
+func FmtVal(v any) string {
+	return fmtVal(v)
+}
+
+// fmtVal is the internal implementation used by the template engine.
 func fmtVal(v any) string {
 	if f, ok := v.(float64); ok {
 		if !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f) {

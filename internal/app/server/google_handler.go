@@ -21,11 +21,23 @@ type pendingOAuth struct {
 	expiresAt time.Time
 }
 
-// handleGoogleAuthStatus returns whether Google Drive is connected.
+// handleGoogleAuthStatus returns whether Google Drive is connected and when the access token expires.
 // GET /api/google/auth/status
 func (s *Server) handleGoogleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	connected := s.settings.Get("GOOGLE_REFRESH_TOKEN") != ""
-	s.respondJSON(w, http.StatusOK, map[string]any{"connected": connected})
+	gc := s.settings.GoogleClient()
+	if gc == nil {
+		s.respondJSON(w, http.StatusOK, map[string]any{"connected": false})
+		return
+	}
+	expiry, err := gc.TokenExpiry()
+	resp := map[string]any{"connected": true}
+	if err != nil {
+		resp["token_error"] = err.Error()
+	} else if !expiry.IsZero() {
+		resp["access_token_expires_at"] = expiry.UTC().Format(time.RFC3339)
+		resp["access_token_expires_in_seconds"] = int(time.Until(expiry).Seconds())
+	}
+	s.respondJSON(w, http.StatusOK, resp)
 }
 
 // getGoogleOAuthCredentials returns OAuth credentials from settings, environment, or built-in defaults.

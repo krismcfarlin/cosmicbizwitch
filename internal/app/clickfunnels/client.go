@@ -460,12 +460,15 @@ func (c *Client) UpdateContact(ctx context.Context, id int, params ContactParams
 	}
 	defer resp.Body.Close()
 
+	respBody, _ := io.ReadAll(resp.Body)
+	log.Printf("[cf] PUT %s response status=%d body=%s", endpoint, resp.StatusCode, respBody)
+
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("clickfunnels: update contact %d: unexpected status %d", id, resp.StatusCode)
+		return nil, fmt.Errorf("clickfunnels: update contact %d: unexpected status %d body=%s", id, resp.StatusCode, respBody)
 	}
 
 	var contact Contact
-	if err := json.NewDecoder(resp.Body).Decode(&contact); err != nil {
+	if err := json.Unmarshal(respBody, &contact); err != nil {
 		return nil, fmt.Errorf("clickfunnels: decode update contact response: %w", err)
 	}
 	return &contact, nil

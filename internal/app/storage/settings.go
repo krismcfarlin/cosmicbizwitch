@@ -77,7 +77,15 @@ func (m *SettingsManager) Reload(logger *log.Logger) error {
 
 	var gc *googleapp.Client
 	if refreshToken != "" {
-		tm := googleapp.NewTokenManager(clientID, clientSecret, refreshToken)
+		tm := googleapp.NewTokenManagerWithPersist(clientID, clientSecret, refreshToken, func(newToken string) error {
+			if err := m.Set("GOOGLE_REFRESH_TOKEN", newToken); err != nil {
+				return err
+			}
+			if logger != nil {
+				logger.Println("[google] refresh token rotated — new token saved to app_settings")
+			}
+			return nil
+		})
 		gc = googleapp.NewClient(tm)
 		if logger != nil {
 			logger.Println("Google Drive client configured from app_settings")

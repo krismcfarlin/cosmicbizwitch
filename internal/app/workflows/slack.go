@@ -86,3 +86,47 @@ func slackString(input map[string]any, key string) string {
 	}
 	return ""
 }
+
+// newSlackSendMessageFn returns a testable ActivityFunc for slack_send_message.
+func newSlackSendMessageFn(getSlack func() *slackapp.Client) workflow.ActivityFunc {
+	return func(ctx context.Context, input map[string]any) (map[string]any, error) {
+		sc := getSlack()
+		if sc == nil {
+			return nil, fmt.Errorf("Slack not connected — add SLACK_BOT_TOKEN in Settings")
+		}
+		channel := slackString(input, "channel")
+		if channel == "" {
+			return nil, fmt.Errorf("slack_send_message: channel is required")
+		}
+		text := slackString(input, "text")
+		if text == "" {
+			return nil, fmt.Errorf("slack_send_message: text is required")
+		}
+		if err := sc.SendMessage(ctx, channel, text); err != nil {
+			return nil, fmt.Errorf("slack_send_message: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+	}
+}
+
+// newSlackListChannelsFn returns a testable ActivityFunc for slack_list_channels.
+func newSlackListChannelsFn(getSlack func() *slackapp.Client) workflow.ActivityFunc {
+	return func(ctx context.Context, input map[string]any) (map[string]any, error) {
+		sc := getSlack()
+		if sc == nil {
+			return nil, fmt.Errorf("Slack not connected — add SLACK_BOT_TOKEN in Settings")
+		}
+		channels, err := sc.ListChannels(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("slack_list_channels: %w", err)
+		}
+		list := make([]any, len(channels))
+		for i, ch := range channels {
+			list[i] = map[string]any{
+				"id":   ch.ID,
+				"name": ch.Name,
+			}
+		}
+		return map[string]any{"channels": list}, nil
+	}
+}

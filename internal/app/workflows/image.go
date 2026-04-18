@@ -170,10 +170,9 @@ func registerImageActivities(eng *workflow.Engine, app core.App, getGoogle func(
 			}
 			if makePublic {
 				if err := gClient.MakePublic(ctx, result.ID); err != nil {
-					log.Printf("[gdrive_svg_to_png] make public failed: %v", err)
-				} else {
-					out["public_url"] = "https://drive.google.com/uc?id=" + result.ID
+					return nil, fmt.Errorf("gdrive_svg_to_png: make public failed: %w", err)
 				}
+				out["public_url"] = "https://drive.google.com/uc?id=" + result.ID
 			}
 
 			log.Printf("[gdrive_svg_to_png] %s → %s (%d bytes) public=%v", fileID, result.ID, len(pngBytes), makePublic)

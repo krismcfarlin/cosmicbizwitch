@@ -384,3 +384,143 @@ func telegramChatID(input map[string]any, key string) (int64, error) {
 	}
 	return n, nil
 }
+
+// newTelegramSendMessageFn returns a testable ActivityFunc for telegram_send_message.
+func newTelegramSendMessageFn(getTelegram func() *telegramapp.Client) workflow.ActivityFunc {
+	return func(ctx context.Context, input map[string]any) (map[string]any, error) {
+		tc := getTelegram()
+		if tc == nil {
+			return nil, fmt.Errorf("Telegram not connected — add TELEGRAM_BOT_TOKEN in Settings")
+		}
+		chatID, err := telegramChatID(input, "chat_id")
+		if err != nil {
+			return nil, fmt.Errorf("telegram_send_message: %w", err)
+		}
+		text := telegramString(input, "text")
+		if text == "" {
+			return nil, fmt.Errorf("telegram_send_message: text is required")
+		}
+		params := telegramapp.SendMessageParams{
+			ChatID:    chatID,
+			Text:      text,
+			ParseMode: telegramString(input, "parse_mode"),
+		}
+		if v, ok := input["reply_to_message_id"]; ok && v != nil {
+			params.ReplyToMessageID = telegramInt64(v)
+		}
+		if v, ok := input["message_thread_id"]; ok && v != nil {
+			params.MessageThreadID = telegramInt64(v)
+		}
+		if v, ok := input["disable_notification"]; ok {
+			if b, ok := v.(bool); ok {
+				params.DisableNotification = b
+			}
+		}
+		if v, ok := input["disable_web_page_preview"]; ok {
+			if b, ok := v.(bool); ok {
+				params.DisableWebPagePreview = b
+			}
+		}
+		if v, ok := input["protect_content"]; ok {
+			if b, ok := v.(bool); ok {
+				params.ProtectContent = b
+			}
+		}
+		if err := tc.SendMessage(params); err != nil {
+			return nil, fmt.Errorf("telegram_send_message: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+	}
+}
+
+// newTelegramGetFileURLFn returns a testable ActivityFunc for telegram_get_file_url.
+func newTelegramGetFileURLFn(getTelegram func() *telegramapp.Client) workflow.ActivityFunc {
+	return func(ctx context.Context, input map[string]any) (map[string]any, error) {
+		tc := getTelegram()
+		if tc == nil {
+			return nil, fmt.Errorf("Telegram not connected — add TELEGRAM_BOT_TOKEN in Settings")
+		}
+		fileID := telegramString(input, "file_id")
+		if fileID == "" {
+			return nil, fmt.Errorf("telegram_get_file_url: file_id is required")
+		}
+		fileURL, err := tc.GetFileURL(fileID)
+		if err != nil {
+			return nil, fmt.Errorf("telegram_get_file_url: %w", err)
+		}
+		return map[string]any{"file_url": fileURL}, nil
+	}
+}
+
+// newTelegramTranscribeFn returns a testable ActivityFunc for telegram_transcribe.
+func newTelegramTranscribeFn(getTelegram func() *telegramapp.Client, app core.App) workflow.ActivityFunc {
+	return func(ctx context.Context, input map[string]any) (map[string]any, error) {
+		tc := getTelegram()
+		if tc == nil {
+			return nil, fmt.Errorf("Telegram not connected — add TELEGRAM_BOT_TOKEN in Settings")
+		}
+		fileID := telegramString(input, "file_id")
+		if fileID == "" {
+			return nil, fmt.Errorf("telegram_transcribe: file_id is required")
+		}
+		language := telegramString(input, "language")
+		resultKey := telegramString(input, "result_key")
+		if resultKey == "" {
+			resultKey = "transcript"
+		}
+		apiKey := llmGetSetting(app, "OPENAI_API_KEY")
+		if apiKey == "" {
+			return nil, fmt.Errorf("telegram_transcribe: no API key configured — set OPENAI_API_KEY in Settings")
+		}
+		fileBytes, ext, err := tc.DownloadFile(fileID)
+		if err != nil {
+			return nil, fmt.Errorf("telegram_transcribe: download file: %w", err)
+		}
+		filename := "audio" + ext
+		if ext == "" {
+			filename = "audio.ogg"
+		}
+		transcript, err := callWhisperTranscribe(apiKey, fileBytes, filename, language)
+		if err != nil {
+			return nil, fmt.Errorf("telegram_transcribe: %w", err)
+		}
+		return map[string]any{
+			resultKey:    transcript,
+			"transcript": transcript,
+		}, nil
+	}
+}
+
+// newTelegramSendButtonFn returns a testable ActivityFunc for telegram_send_button.
+func newTelegramSendButtonFn(getTelegram func() *telegramapp.Client) workflow.ActivityFunc {
+	return func(ctx context.Context, input map[string]any) (map[string]any, error) {
+		tc := getTelegram()
+		if tc == nil {
+			return nil, fmt.Errorf("Telegram not connected — add TELEGRAM_BOT_TOKEN in Settings")
+		}
+		chatID, err := telegramChatID(input, "chat_id")
+		if err != nil {
+			return nil, fmt.Errorf("telegram_send_button: %w", err)
+		}
+		text := telegramString(input, "text")
+		if text == "" {
+			return nil, fmt.Errorf("telegram_send_button: text is required")
+		}
+		buttons, err := telegramParseButtons(input["buttons"])
+		if err != nil {
+			return nil, fmt.Errorf("telegram_send_button: %w", err)
+		}
+		if len(buttons) == 0 {
+			return nil, fmt.Errorf("telegram_send_button: buttons must have at least one row")
+		}
+		parseMode := telegramString(input, "parse_mode")
+		var messageThreadID int64
+		if v, ok := input["message_thread_id"]; ok && v != nil {
+			messageThreadID = telegramInt64(v)
+		}
+		if err := tc.SendMessageWithButtons(chatID, messageThreadID, text, parseMode, buttons); err != nil {
+			return nil, fmt.Errorf("telegram_send_button: %w", err)
+		}
+		return map[string]any{"ok": true}, nil
+	}
+}

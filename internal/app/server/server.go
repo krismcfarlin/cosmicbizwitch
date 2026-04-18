@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -241,7 +242,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleMCPListTools returns the list of available MCP tools
+// handleMCPListTools returns the list of available MCP tools, including workflow activities.
 func (s *Server) handleMCPListTools(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -249,35 +250,97 @@ func (s *Server) handleMCPListTools(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tools := s.mcpServer.ListTools()
+
+	// Merge in all registered workflow activities.
+	if s.engine != nil {
+		for _, info := range s.engine.ListActivities() {
+			tools = append(tools, activityToMCPTool(info))
+		}
+	}
+
 	s.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"tools": tools,
 	})
 }
 
-// handleMCPCallTool handles MCP tool calls
+// handleMCPCallTool handles MCP tool calls, routing to workflow activities when applicable.
 func (s *Server) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Decode request
 	var req mcp.ToolCallRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
 		return
 	}
 
-	// Call tool
+	// Route to workflow activity if registered.
+	if s.engine != nil && s.engine.HasActivity(req.Name) {
+		out, err := s.engine.ExecuteActivity(r.Context(), req.Name, req.Arguments)
+		if err != nil {
+			if errors.Is(err, workflow.ErrSkip) {
+				s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+					Content: []mcp.ContentBlock{{Type: "text", Text: "Activity skipped"}},
+				})
+				return
+			}
+			s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+				Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}},
+				IsError: true,
+			})
+			return
+		}
+		outJSON, _ := json.Marshal(out)
+		s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+			Content: []mcp.ContentBlock{{Type: "text", Text: string(outJSON)}},
+		})
+		return
+	}
+
+	// Delegate to static MCP server.
 	resp, err := s.mcpServer.CallTool(r.Context(), req)
 	if err != nil {
 		s.logger.Printf("MCP tool call failed: %v", err)
-		// Return the error response from MCP server
 		s.respondJSON(w, http.StatusOK, resp)
 		return
 	}
 
 	s.respondJSON(w, http.StatusOK, resp)
+}
+
+// activityToMCPTool converts a workflow ActivityInfo into an MCP Tool definition.
+func activityToMCPTool(info workflow.ActivityInfo) mcp.Tool {
+	props := map[string]interface{}{}
+	required := []string{}
+	for _, f := range info.Meta.InputFields {
+		prop := map[string]interface{}{"description": f.Description}
+		switch f.Type {
+		case "number":
+			prop["type"] = "number"
+		case "boolean":
+			prop["type"] = "boolean"
+		default:
+			prop["type"] = "string"
+		}
+		if len(f.Options) > 0 {
+			prop["enum"] = f.Options
+		}
+		props[f.Name] = prop
+		if f.Required {
+			required = append(required, f.Name)
+		}
+	}
+	schema := map[string]interface{}{"type": "object", "properties": props}
+	if len(required) > 0 {
+		schema["required"] = required
+	}
+	return mcp.Tool{
+		Name:        info.Name,
+		Description: info.Meta.Description,
+		InputSchema: schema,
+	}
 }
 
 // handleSettingsList returns all app settings. Secret values are masked as empty strings.
