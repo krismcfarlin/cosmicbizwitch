@@ -144,6 +144,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /workflows/builder", s.requireAuth(s.handleLogsPage))
 	mux.HandleFunc("GET /workflows", s.requireAuth(s.handleLogsPage))
 	mux.HandleFunc("GET /workflows/{path...}", s.requireAuth(s.handleLogsPage))
+	mux.HandleFunc("GET /history", s.requireAuth(s.handleLogsPage))
 
 	// Workflow API (auth required)
 	mux.HandleFunc("GET /api/workflows/stream", s.requireAuth(s.handleWorkflowStream))
