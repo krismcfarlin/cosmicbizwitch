@@ -90,7 +90,10 @@ export default function WorkflowHistory() {
   const restartAllFailed = async () => {
     const failed = workflows.filter(w => w.status === 'failed')
     if (failed.length === 0) return
-    await Promise.all(failed.map(w => fetch(`/api/workflows/${w.id}/restart`, { method: 'POST' })))
+    const BATCH = 5
+    for (let i = 0; i < failed.length; i += BATCH) {
+      await Promise.all(failed.slice(i, i + BATCH).map(w => fetch(`/api/workflows/${w.id}/restart`, { method: 'POST' })))
+    }
     fetchWorkflows(page, statusFilter, graphFilter)
   }
 
