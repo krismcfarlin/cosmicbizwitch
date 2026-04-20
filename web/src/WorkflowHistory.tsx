@@ -87,6 +87,13 @@ export default function WorkflowHistory() {
     fetchWorkflows(page, statusFilter, graphFilter)
   }
 
+  const restartAllFailed = async () => {
+    const failed = workflows.filter(w => w.status === 'failed')
+    if (failed.length === 0) return
+    await Promise.all(failed.map(w => fetch(`/api/workflows/${w.id}/restart`, { method: 'POST' })))
+    fetchWorkflows(page, statusFilter, graphFilter)
+  }
+
   const deleteWorkflow = async (id: string, name: string, e: React.MouseEvent) => {
     e.stopPropagation()
     if (!confirm(`Delete workflow "${name || id.slice(0, 8)}"? This cannot be undone.`)) return
@@ -123,6 +130,11 @@ export default function WorkflowHistory() {
               onChange={e => { setGraphFilter(e.target.value); setPage(0) }}
               style={{ padding: '6px 10px', borderRadius: '4px', border: '1px solid #d0d7de', fontSize: '13px', width: '160px' }}
             />
+            {workflows.some(w => w.status === 'failed') && (
+              <button onClick={restartAllFailed} style={{ background: '#e67e22', color: 'white', padding: '6px 14px', borderRadius: '4px', fontSize: '13px', fontWeight: 500, border: 'none', cursor: 'pointer' }}>
+                Restart All Failed ({workflows.filter(w => w.status === 'failed').length})
+              </button>
+            )}
             <button onClick={() => fetchWorkflows(page, statusFilter, graphFilter)} style={{ background: '#667eea', color: 'white', padding: '6px 14px', borderRadius: '4px', fontSize: '13px', fontWeight: 500, border: 'none', cursor: 'pointer' }}>Refresh</button>
           </div>
         </header>
