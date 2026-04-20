@@ -183,6 +183,16 @@ export default function WorkflowList() {
     }
   }
 
+  const deleteGraph = async (g: string) => {
+    if (!confirm(`Delete graph "${g}"? This cannot be undone.`)) return
+    const res = await fetch(`/api/workflows/graphs/${encodeURIComponent(g)}`, { method: 'DELETE' })
+    if (res.ok) {
+      setGraphs(prev => prev.filter(name => name !== g))
+    } else {
+      alert(`Failed to delete graph "${g}"`)
+    }
+  }
+
   const sortedGraphs = [...graphs].sort((a, b) => a.localeCompare(b))
   const activeWorkflows = sortByStartedAt(workflows.filter(w => (ACTIVE_STATUSES as string[]).includes(w.status)))
 
@@ -219,6 +229,10 @@ export default function WorkflowList() {
                           style={{ background: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>Edit</button>
                         <button onClick={() => duplicateGraph(g)}
                           style={{ background: '#2980b9', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>Duplicate</button>
+                        <button onClick={() => navigate(`/history?graph=${encodeURIComponent(g)}`)}
+                          style={{ background: '#e67e22', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>History</button>
+                        <button onClick={() => deleteGraph(g)}
+                          style={{ background: '#c0392b', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>Delete</button>
                         <button onClick={() => { setNewGraph(g); setNewName(''); setNewContext('{}'); setCreateModal(true) }}
                           style={{ background: '#27ae60', color: 'white', border: 'none', borderRadius: '4px', padding: '4px 10px', cursor: 'pointer', fontSize: '12px', fontWeight: 500 }}>▶ Run</button>
                       </div>

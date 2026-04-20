@@ -13,22 +13,33 @@ import (
 
 // handleWorkflowList returns paginated workflows.
 // GET /api/workflows?status=running&graph=my_graph&limit=50&offset=0
+// Multiple status values are supported: ?status=completed&status=failed
 func (s *Server) handleWorkflowList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	offset, _ := strconv.Atoi(q.Get("offset"))
+	statuses := q["status"] // []string, may be empty, single, or multiple
 
-	wfs, err := s.engine.Store().ListWorkflows(r.Context(), workflow.ListFilter{
-		Status:    q.Get("status"),
+	filter := workflow.ListFilter{
 		GraphName: q.Get("graph"),
 		Limit:     limit,
 		Offset:    offset,
-	})
+	}
+	if len(statuses) == 1 {
+		filter.Status = statuses[0]
+	} else if len(statuses) > 1 {
+		filter.Statuses = statuses
+	}
+
+	store := s.engine.Store()
+	wfs, err := store.ListWorkflows(r.Context(), filter)
 	if err != nil {
 		s.respondError(w, http.StatusInternalServerError, "list workflows failed", err)
 		return
 	}
-	s.respondJSON(w, http.StatusOK, map[string]any{"workflows": wfs, "count": len(wfs)})
+	total, _ := store.CountWorkflows(r.Context(), filter)
+
+	s.respondJSON(w, http.StatusOK, map[string]any{"workflows": wfs, "count": total})
 }
 
 // handleWorkflowCreate creates a new workflow.
@@ -298,6 +309,17 @@ func (s *Server) handleGraphDuplicate(w http.ResponseWriter, r *http.Request) {
 		s.logger.Printf("[workflow] failed to persist duplicate graph %q: %v", copy.Name, err)
 	}
 	s.respondJSON(w, http.StatusCreated, map[string]any{"graph": copy})
+}
+
+// handleGraphDelete removes a graph from the engine and store.
+// DELETE /api/workflows/graphs/{name}
+func (s *Server) handleGraphDelete(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := s.engine.RemoveGraph(r.Context(), name); err != nil {
+		s.respondError(w, http.StatusInternalServerError, "delete graph failed", err)
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{"deleted": name})
 }
 
 // handleWorkflowGraphs returns all registered graph definitions.

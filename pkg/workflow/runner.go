@@ -217,9 +217,24 @@ func (e *Engine) runWorkflow(ctx context.Context, wf *Workflow) {
 }
 
 // findOrCreateInstance returns an existing pending/running instance for this node,
-// or creates a fresh one.
+// or creates a fresh one. Retries on transient DB errors (SQLite lock/deadline).
 func (e *Engine) findOrCreateInstance(ctx context.Context, wf *Workflow, node *Node) (*ActivityInstance, error) {
-	instances, err := e.store.ListActivityInstances(ctx, wf.ID)
+	var instances []*ActivityInstance
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		instances, err = e.store.ListActivityInstances(ctx, wf.ID)
+		if err == nil {
+			break
+		}
+		if attempt < 4 {
+			e.logger.Printf("[workflow] findOrCreateInstance: transient DB error (attempt %d/5): %v", attempt+1, err)
+			select {
+			case <-time.After(time.Duration(200*(attempt+1)) * time.Millisecond):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

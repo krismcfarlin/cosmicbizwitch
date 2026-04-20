@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -26,13 +25,12 @@ const defaultServerURL = "https://server.cosmicbizwitch.com"
 
 // tokenManager holds a cached bearer token and re-auths when it expires.
 type tokenManager struct {
-	mu         sync.Mutex
-	serverURL  string
-	email      string
-	password   string
-	token      string
-	expiry     time.Time
-	logger     *log.Logger
+	mu       sync.Mutex
+	serverURL string
+	email    string
+	password string
+	token    string
+	expiry   time.Time
 }
 
 // get returns a valid bearer token, refreshing via PocketBase auth if needed.
@@ -72,17 +70,16 @@ func (tm *tokenManager) get() (string, error) {
 		return "", fmt.Errorf("auth response parse error: %w", err)
 	}
 	tm.token = result.Token
-	tm.expiry = time.Now().Add(23 * time.Hour) // PB superuser tokens last 24h
-	tm.logger.Printf("re-authenticated successfully")
+	tm.expiry = time.Now().Add(23 * time.Hour)
 	return tm.token, nil
 }
 
 // rpcRequest is an inbound JSON-RPC 2.0 message from the MCP client.
 type rpcRequest struct {
-	JSONRPC string          `json:"jsonrpc"`
+	JSONRPC string           `json:"jsonrpc"`
 	ID      *json.RawMessage `json:"id,omitempty"` // nil for notifications
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params,omitempty"`
+	Method  string           `json:"method"`
+	Params  json.RawMessage  `json:"params,omitempty"`
 }
 
 // rpcResponse is an outbound JSON-RPC 2.0 response.
@@ -110,24 +107,17 @@ func main() {
 		serverURL = defaultServerURL
 	}
 
-	logger := log.New(os.Stderr, "[mcp-proxy] ", log.LstdFlags)
-
 	tm := &tokenManager{
 		serverURL: serverURL,
 		email:     os.Getenv("CBW_PB_EMAIL"),
 		password:  os.Getenv("CBW_PB_PASSWORD"),
 		token:     os.Getenv("CBW_API_TOKEN"),
-		logger:    logger,
 	}
-	// Pre-validate: at startup we need either a static token or credentials.
 	if tm.token == "" && (tm.email == "" || tm.password == "") {
-		fmt.Fprintln(os.Stderr, "mcp-proxy: set CBW_API_TOKEN or CBW_PB_EMAIL+CBW_PB_PASSWORD")
 		os.Exit(1)
 	}
-	// If credentials provided, do an immediate auth to validate them.
 	if tm.email != "" && tm.password != "" {
 		if _, err := tm.get(); err != nil {
-			fmt.Fprintf(os.Stderr, "mcp-proxy: initial auth failed: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -135,7 +125,6 @@ func main() {
 	enc := json.NewEncoder(os.Stdout)
 
 	scanner := bufio.NewScanner(os.Stdin)
-	// 1 MB buffer — enough for large tool result payloads.
 	scanner.Buffer(make([]byte, 1<<20), 1<<20)
 
 	for scanner.Scan() {
@@ -146,13 +135,11 @@ func main() {
 
 		var req rpcRequest
 		if err := json.Unmarshal(line, &req); err != nil {
-			logger.Printf("parse error: %v", err)
 			continue
 		}
 
 		// Notifications have no id — do not send a response.
 		if req.ID == nil {
-			logger.Printf("notification: %s (no response)", req.Method)
 			continue
 		}
 
@@ -164,9 +151,9 @@ func main() {
 		switch req.Method {
 		case "initialize":
 			resp.Result = map[string]interface{}{
-				"protocolVersion": "2024-11-05",
-				"capabilities":   map[string]interface{}{"tools": map[string]interface{}{}},
-				"serverInfo":     map[string]interface{}{"name": "cosmicbizwitch", "version": "1.0.0"},
+				"protocolVersion": "2025-11-25",
+				"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
+				"serverInfo":      map[string]interface{}{"name": "cosmicbizwitch", "version": "1.0.0"},
 			}
 
 		case "ping":
@@ -180,7 +167,6 @@ func main() {
 			}
 			result, err := proxyGET(serverURL+"/mcp/tools", token)
 			if err != nil {
-				logger.Printf("tools/list error: %v", err)
 				resp.Error = &rpcError{Code: -32603, Message: fmt.Sprintf("upstream error: %v", err)}
 			} else {
 				resp.Result = result
@@ -203,7 +189,6 @@ func main() {
 			}
 			result, err := proxyPOST(serverURL+"/mcp/call", token, body)
 			if err != nil {
-				logger.Printf("tools/call error: %v", err)
 				resp.Error = &rpcError{Code: -32603, Message: fmt.Sprintf("upstream error: %v", err)}
 			} else {
 				resp.Result = result
@@ -213,14 +198,7 @@ func main() {
 			resp.Error = &rpcError{Code: -32601, Message: "method not found"}
 		}
 
-		if err := enc.Encode(resp); err != nil {
-			logger.Printf("encode response error: %v", err)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		logger.Printf("stdin read error: %v", err)
-		os.Exit(1)
+		enc.Encode(resp) //nolint
 	}
 }
 

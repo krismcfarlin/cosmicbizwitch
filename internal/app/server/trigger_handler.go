@@ -84,6 +84,8 @@ func (s *Server) handleTriggerFire(w http.ResponseWriter, r *http.Request) {
 
 // handleWebhook is the public endpoint — no auth required.
 // POST /webhooks/{token}
+// Immediately returns 200 and queues the payload for serial processing to avoid
+// DB contention when many webhooks arrive simultaneously (e.g. CF bursts).
 func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	var payload map[string]any
@@ -91,10 +93,6 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
-	wf, err := s.triggers.FireWebhook(r.Context(), token, payload)
-	if err != nil {
-		http.Error(w, "invalid token or trigger disabled", http.StatusNotFound)
-		return
-	}
-	s.respondJSON(w, http.StatusOK, map[string]any{"workflow": wf})
+	s.triggers.EnqueueWebhook(token, payload)
+	s.respondJSON(w, http.StatusOK, map[string]any{"queued": true})
 }

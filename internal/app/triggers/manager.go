@@ -33,11 +33,18 @@ type Trigger struct {
 const colTriggers = "wf_triggers"
 const timeFmt     = "2006-01-02 15:04:05.000Z"
 
+// webhookJob is one enqueued webhook payload waiting to be processed.
+type webhookJob struct {
+	token   string
+	payload map[string]any
+}
+
 // Manager handles all trigger types.
 type Manager struct {
-	app    core.App
-	engine *workflow.Engine
-	logger *log.Logger
+	app       core.App
+	engine    *workflow.Engine
+	logger    *log.Logger
+	webhookQ  chan webhookJob
 }
 
 // New creates a new Manager. If logger is nil, log.Default() is used.
@@ -45,7 +52,12 @@ func New(app core.App, engine *workflow.Engine, logger *log.Logger) *Manager {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Manager{app: app, engine: engine, logger: logger}
+	return &Manager{
+		app:      app,
+		engine:   engine,
+		logger:   logger,
+		webhookQ: make(chan webhookJob, 1000),
+	}
 }
 
 // Start registers PocketBase record hooks and launches the cron goroutine.
@@ -74,6 +86,20 @@ func (m *Manager) Start(ctx context.Context) {
 				return
 			case <-ticker.C:
 				m.fireCronTriggers(ctx)
+			}
+		}
+	}()
+
+	// Webhook queue drainer — processes one webhook at a time to avoid DB burst.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case job := <-m.webhookQ:
+				if _, err := m.FireWebhook(ctx, job.token, job.payload); err != nil {
+					m.logger.Printf("[triggers] webhook queue: fire failed (token=%s): %v", job.token, err)
+				}
 			}
 		}
 	}()
@@ -191,6 +217,19 @@ func (m *Manager) FireByID(ctx context.Context, id string, payload map[string]an
 	}
 	_ = m.updateLastFired(t.ID)
 	return wf, nil
+}
+
+// EnqueueWebhook pushes a webhook payload onto the in-memory queue and returns immediately.
+// The drainer goroutine (started in Start) processes jobs one at a time.
+// Returns false if the queue is full (buffer of 1000 slots).
+func (m *Manager) EnqueueWebhook(token string, payload map[string]any) bool {
+	select {
+	case m.webhookQ <- webhookJob{token: token, payload: payload}:
+		return true
+	default:
+		m.logger.Printf("[triggers] webhook queue full — dropping token=%s", token)
+		return false
+	}
 }
 
 // FireWebhook finds a trigger by token and starts a workflow with the given payload.

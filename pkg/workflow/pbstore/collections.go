@@ -107,6 +107,34 @@ func MigrateAddInitialContext(app core.App) error {
 	return app.Save(col)
 }
 
+// MigrateAddRawTelegramFromID adds a from_id numeric field to the raw_telegram collection.
+// No-op if field already exists or collection doesn't exist.
+func MigrateAddRawTelegramFromID(app core.App) error {
+	col, err := app.FindCollectionByNameOrId("raw_telegram")
+	if err != nil {
+		return nil
+	}
+	if col.Fields.GetByName("from_id") != nil {
+		return nil
+	}
+	col.Fields.Add(&core.NumberField{Name: "from_id"})
+	return app.Save(col)
+}
+
+// MigrateAddTelegramID adds a telegram_id text field to the contacts collection.
+// No-op if field already exists or collection doesn't exist.
+func MigrateAddTelegramID(app core.App) error {
+	col, err := app.FindCollectionByNameOrId("contacts")
+	if err != nil {
+		return nil // contacts collection may not exist in all installs
+	}
+	if col.Fields.GetByName("telegram_id") != nil {
+		return nil // already migrated
+	}
+	col.Fields.Add(&core.TextField{Name: "telegram_id", Max: 64})
+	return app.Save(col)
+}
+
 func createGraphsCollection(app core.App) error {
 	if existing, _ := app.FindCollectionByNameOrId("wf_graphs"); existing != nil {
 		return nil

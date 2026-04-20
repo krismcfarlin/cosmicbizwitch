@@ -50,6 +50,10 @@ type Engine struct {
 	mu      sync.RWMutex
 	running map[string]context.CancelFunc // workflowID → cancel
 
+	// sem limits the number of concurrently running workflow goroutines to
+	// prevent SQLite lock contention under burst loads.
+	sem chan struct{}
+
 	// humanChannels maps workflowID → channel the runner is blocking on.
 	// TriggerHuman writes to this channel to resume a paused workflow.
 	humanChannels sync.Map // map[string]chan HumanSignal
@@ -73,6 +77,7 @@ type HumanSignal struct {
 // EngineConfig holds optional configuration for the Engine.
 type EngineConfig struct {
 	PollInterval     time.Duration // default 5s
+	MaxConcurrent    int           // max parallel workflow goroutines; default 10
 	Logger           *log.Logger
 	OnWorkflowFailed func(wf *Workflow, reason string) // called in a goroutine when any workflow fails
 }
@@ -81,6 +86,9 @@ type EngineConfig struct {
 func NewEngine(store Store, cfg EngineConfig) *Engine {
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 5 * time.Second
+	}
+	if cfg.MaxConcurrent <= 0 {
+		cfg.MaxConcurrent = 10
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = log.Default()
@@ -92,6 +100,7 @@ func NewEngine(store Store, cfg EngineConfig) *Engine {
 		graphs:           make(map[string]*ActivityGraph),
 		running:          make(map[string]context.CancelFunc),
 		subscribers:      make(map[chan Event]struct{}),
+		sem:              make(chan struct{}, cfg.MaxConcurrent),
 		logger:           cfg.Logger,
 		pollInterval:     cfg.PollInterval,
 		onWorkflowFailed: cfg.OnWorkflowFailed,
@@ -367,6 +376,8 @@ func (e *Engine) poll(ctx context.Context) {
 }
 
 // dispatch starts a runner goroutine for one workflow if not already running.
+// It blocks acquiring the concurrency semaphore, so bursts queue rather than
+// all firing simultaneously and hammering SQLite.
 func (e *Engine) dispatch(ctx context.Context, wf *Workflow) {
 	e.mu.Lock()
 	if _, ok := e.running[wf.ID]; ok {
@@ -386,8 +397,23 @@ func (e *Engine) dispatch(ctx context.Context, wf *Workflow) {
 			delete(e.running, wf.ID)
 			e.mu.Unlock()
 		}()
+		// Acquire semaphore slot — blocks if MaxConcurrent runners already active.
+		select {
+		case e.sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		defer func() { <-e.sem }()
 		e.runWorkflow(runCtx, wf)
 	}()
+}
+
+// RemoveGraph unregisters a graph from the engine and deletes it from the store.
+func (e *Engine) RemoveGraph(ctx context.Context, name string) error {
+	e.mu.Lock()
+	delete(e.graphs, name)
+	e.mu.Unlock()
+	return e.store.DeleteGraph(ctx, name)
 }
 
 // GetGraph returns a registered graph by name (for API inspection/visualization).

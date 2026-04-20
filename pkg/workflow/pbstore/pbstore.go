@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"cosmicbizwitch/pkg/workflow"
@@ -67,17 +68,7 @@ func (s *PBStore) ListWorkflows(_ context.Context, filter workflow.ListFilter) (
 		filter.Limit = 50
 	}
 
-	filterStr := "1=1"
-	params := dbx.Params{}
-
-	if filter.Status != "" {
-		filterStr += " && status = {:status}"
-		params["status"] = filter.Status
-	}
-	if filter.GraphName != "" {
-		filterStr += " && graph_name = {:graph_name}"
-		params["graph_name"] = filter.GraphName
-	}
+	filterStr, params := buildWorkflowFilter(filter)
 
 	records, err := s.app.FindRecordsByFilter(colWorkflows, filterStr, "-created", filter.Limit, filter.Offset, params)
 	if err != nil {
@@ -89,6 +80,30 @@ func (s *PBStore) ListWorkflows(_ context.Context, filter workflow.ListFilter) (
 		out[i] = recordToWorkflow(r)
 	}
 	return out, nil
+}
+
+// buildWorkflowFilter constructs a PocketBase filter string and params from a ListFilter.
+func buildWorkflowFilter(filter workflow.ListFilter) (string, dbx.Params) {
+	filterStr := "1=1"
+	params := dbx.Params{}
+
+	if len(filter.Statuses) > 0 {
+		parts := make([]string, len(filter.Statuses))
+		for i, s := range filter.Statuses {
+			key := fmt.Sprintf("s%d", i)
+			parts[i] = fmt.Sprintf("status = {:%s}", key)
+			params[key] = s
+		}
+		filterStr += " && (" + strings.Join(parts, " || ") + ")"
+	} else if filter.Status != "" {
+		filterStr += " && status = {:status}"
+		params["status"] = filter.Status
+	}
+	if filter.GraphName != "" {
+		filterStr += " && graph_name = {:graph_name}"
+		params["graph_name"] = filter.GraphName
+	}
+	return filterStr, params
 }
 
 func (s *PBStore) GetRunnableWorkflows(_ context.Context) ([]*workflow.Workflow, error) {
@@ -259,6 +274,15 @@ func (s *PBStore) LoadGraphs(_ context.Context) ([]*workflow.ActivityGraph, erro
 		out = append(out, &g)
 	}
 	return out, nil
+}
+
+// DeleteGraph removes a persisted graph record by name.
+func (s *PBStore) DeleteGraph(_ context.Context, name string) error {
+	recs, err := s.app.FindRecordsByFilter(colGraphs, "name = {:name}", "", 1, 0, dbx.Params{"name": name})
+	if err != nil || len(recs) == 0 {
+		return nil // not persisted — nothing to delete
+	}
+	return s.app.Delete(recs[0])
 }
 
 // ResetStuckWorkflows finds all workflows in running or paused status and
@@ -438,18 +462,34 @@ func parseTime(s string) time.Time {
 var _ workflow.Store = (*PBStore)(nil)
 
 // CountWorkflows returns the total count matching a filter (for API pagination).
+// Uses dbx expressions directly (not PocketBase filter syntax) since CountRecords uses dbx.
 func (s *PBStore) CountWorkflows(_ context.Context, filter workflow.ListFilter) (int, error) {
-	filterStr := "1=1"
-	params := dbx.Params{}
-	if filter.Status != "" {
-		filterStr += " && status = {:status}"
-		params["status"] = filter.Status
+	var conditions []dbx.Expression
+
+	if len(filter.Statuses) > 0 {
+		orConds := make([]dbx.Expression, len(filter.Statuses))
+		for i, s := range filter.Statuses {
+			orConds[i] = dbx.HashExp{"status": s}
+		}
+		conditions = append(conditions, dbx.Or(orConds...))
+	} else if filter.Status != "" {
+		conditions = append(conditions, dbx.HashExp{"status": filter.Status})
 	}
 	if filter.GraphName != "" {
-		filterStr += " && graph_name = {:graph_name}"
-		params["graph_name"] = filter.GraphName
+		conditions = append(conditions, dbx.HashExp{"graph_name": filter.GraphName})
 	}
-	n, err := s.app.CountRecords(colWorkflows, dbx.HashExp(params))
+
+	var expr dbx.Expression
+	switch len(conditions) {
+	case 0:
+		expr = dbx.NewExp("1=1")
+	case 1:
+		expr = conditions[0]
+	default:
+		expr = dbx.And(conditions...)
+	}
+
+	n, err := s.app.CountRecords(colWorkflows, expr)
 	if err != nil {
 		return 0, fmt.Errorf("count workflows: %w", err)
 	}

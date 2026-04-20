@@ -86,6 +86,12 @@ func main() {
 			if err := pbstore.MigrateAddInitialContext(e.App); err != nil {
 				return fmt.Errorf("migrate initial_context: %w", err)
 			}
+			if err := pbstore.MigrateAddTelegramID(e.App); err != nil {
+				return fmt.Errorf("migrate telegram_id: %w", err)
+			}
+			if err := pbstore.MigrateAddRawTelegramFromID(e.App); err != nil {
+				return fmt.Errorf("migrate raw_telegram from_id: %w", err)
+			}
 
 			// Settings manager — reads CF credentials from app_settings collection.
 			settingsMgr := storage.NewSettingsManager(e.App)
@@ -115,6 +121,18 @@ func main() {
 				return fmt.Errorf("register default workflows: %w", err)
 			}
 
+			// Reload any user-built graphs that were persisted to DB in previous sessions.
+			if persistedGraphs, loadErr := pbstore.New(e.App).LoadGraphs(context.Background()); loadErr != nil {
+				logger.Printf("warning: failed to load persisted graphs: %v", loadErr)
+			} else {
+				for _, g := range persistedGraphs {
+					if regErr := eng.RegisterGraph(g); regErr != nil {
+						logger.Printf("warning: failed to re-register persisted graph %q: %v", g.Name, regErr)
+					}
+				}
+				logger.Printf("Loaded %d persisted graph(s) from DB", len(persistedGraphs))
+			}
+
 			// PocketBase hook example — trigger a workflow when a contact is created:
 			// e.App.OnRecordAfterCreateSuccess("contacts").BindFunc(func(ev *core.RecordEvent) error {
 			//     go eng.CreateWorkflow(context.Background(), "onboard_contact", "onboard_contact",
@@ -133,6 +151,7 @@ func main() {
 				Port:      port,
 				Logger:    logger,
 				LogBuffer: logBuf,
+				CFClient:  settingsMgr.CFClient(),
 				Engine:    eng,
 				Triggers:  triggerMgr,
 				Settings:  settingsMgr,

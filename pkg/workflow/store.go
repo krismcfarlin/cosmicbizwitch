@@ -36,15 +36,23 @@ type Store interface {
 	// LoadGraphs returns all persisted graph definitions.
 	LoadGraphs(ctx context.Context) ([]*ActivityGraph, error)
 
+	// DeleteGraph removes a persisted graph by name.
+	DeleteGraph(ctx context.Context, name string) error
+
 	// ResetStuckWorkflows resets workflows in running or paused status back to
 	// pending so the poller picks them up after a restart.
 	ResetStuckWorkflows(ctx context.Context) error
+
+	// CountWorkflows returns the total number of workflows matching a filter.
+	// Used for API pagination responses.
+	CountWorkflows(ctx context.Context, filter ListFilter) (int, error)
 }
 
 // ListFilter controls pagination and filtering for ListWorkflows.
 type ListFilter struct {
-	Status    string // "" = all statuses
-	GraphName string // "" = all graphs
-	Limit     int    // 0 = default 50
+	Status    string   // "" = all statuses; ignored when Statuses is non-empty
+	Statuses  []string // match any of these statuses; overrides Status when set
+	GraphName string   // "" = all graphs
+	Limit     int      // 0 = default 50
 	Offset    int
 }

@@ -32,7 +32,7 @@ REMOTE_SRC="$REMOTE_DIR/src"
 
 # Use a single SSH ControlMaster socket so all connections reuse one session.
 SOCKET="/tmp/deploy-ssh-$$"
-SSH="ssh -o ControlMaster=auto -o ControlPath=$SOCKET -o ControlPersist=120"
+SSH="ssh -i ~/.ssh/githubkey2 -o ControlMaster=auto -o ControlPath=$SOCKET -o ControlPersist=120"
 
 # Open the master connection once.
 $SSH -fN "root@$SERVER"
@@ -83,7 +83,7 @@ ENDSSH
 # ---------------------------------------------------------------------------
 echo "==> Syncing source to $SERVER:$REMOTE_SRC ..."
 rsync -av --delete \
-  -e "ssh -o ControlMaster=auto -o ControlPath=$SOCKET -o ControlPersist=120" \
+  -e "ssh -i ~/.ssh/githubkey2 -o ControlMaster=auto -o ControlPath=$SOCKET -o ControlPersist=120" \
   --exclude='.git/' \
   --exclude='data/' \
   --exclude='*.db' \

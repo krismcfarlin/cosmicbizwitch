@@ -151,6 +151,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workflows/activities", s.requireAuth(s.handleWorkflowActivitiesList))
 	mux.HandleFunc("POST /api/workflows/graphs", s.requireAuth(s.handleGraphSave))
 	mux.HandleFunc("POST /api/workflows/graphs/{name}/duplicate", s.requireAuth(s.handleGraphDuplicate))
+	mux.HandleFunc("DELETE /api/workflows/graphs/{name}", s.requireAuth(s.handleGraphDelete))
 	mux.HandleFunc("POST /api/workflows/execute-node", s.requireAuth(s.handleExecuteNode))
 	mux.HandleFunc("GET /api/pb/collections/{name}/fields", s.requireAuth(s.handlePbCollectionFields))
 	mux.HandleFunc("GET /api/llm/models", s.requireAuth(s.handleLLMModels))
@@ -251,6 +252,32 @@ func (s *Server) handleMCPListTools(w http.ResponseWriter, r *http.Request) {
 
 	tools := s.mcpServer.ListTools()
 
+	// Add run_workflow tool.
+	if s.engine != nil {
+		tools = append(tools, mcp.Tool{
+			Name:        "run_workflow",
+			Description: "Start a workflow by graph name with an optional JSON context payload. Returns the workflow ID and status.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"graph_name": map[string]interface{}{
+						"type":        "string",
+						"description": "Name of the registered workflow graph to run",
+					},
+					"context": map[string]interface{}{
+						"type":        "object",
+						"description": "JSON object passed as the initial workflow context/payload",
+					},
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional human-readable name for this workflow run",
+					},
+				},
+				"required": []string{"graph_name"},
+			},
+		})
+	}
+
 	// Merge in all registered workflow activities.
 	if s.engine != nil {
 		for _, info := range s.engine.ListActivities() {
@@ -273,6 +300,32 @@ func (s *Server) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
 	var req mcp.ToolCallRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	// Handle run_workflow tool.
+	if s.engine != nil && req.Name == "run_workflow" {
+		graphName, _ := req.Arguments["graph_name"].(string)
+		if graphName == "" {
+			s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+				Content: []mcp.ContentBlock{{Type: "text", Text: "Error: graph_name is required"}},
+				IsError: true,
+			})
+			return
+		}
+		ctx, _ := req.Arguments["context"].(map[string]interface{})
+		name, _ := req.Arguments["name"].(string)
+		wf, err := s.engine.CreateWorkflow(r.Context(), name, graphName, ctx, nil)
+		if err != nil {
+			s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+				Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}},
+				IsError: true,
+			})
+			return
+		}
+		s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+			Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("Workflow started: id=%s status=%s graph=%s", wf.ID, wf.Status, wf.GraphName)}},
+		})
 		return
 	}
 
