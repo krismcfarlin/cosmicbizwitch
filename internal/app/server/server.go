@@ -199,6 +199,8 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/telegram/set-webhook", s.requireAuth(s.handleTelegramSetWebhook))
 	mux.HandleFunc("GET /api/telegram/messages", s.requireAuth(s.handleTelegramMessages))
 	mux.HandleFunc("DELETE /api/telegram/messages", s.requireAuth(s.handleTelegramMessagesClear))
+	mux.HandleFunc("POST /api/telegram/index", s.requireAuth(s.handleTelegramIndex))
+	mux.HandleFunc("GET /api/telegram/vector-stats", s.requireAuth(s.handleTelegramVectorStats))
 
 	// ClickFunnels API helpers (auth required)
 	mux.HandleFunc("GET /api/cf/tags", s.requireAuth(s.handleCFTags))

@@ -65,6 +65,27 @@ func New(app core.App, legacyDB *sql.DB, cfg Config) (*Store, error) {
 		cfg.Logger.Printf("⚠️ Failed to create meetings table: %v", err)
 	}
 
+	// Ensure telegram_vectors table exists in coaching.db (vector ops)
+	if _, err := legacyDB.Exec(`
+		CREATE TABLE IF NOT EXISTS telegram_vectors (
+			id          TEXT PRIMARY KEY,
+			message_id  INTEGER NOT NULL,
+			from_id     INTEGER,
+			chat_id     INTEGER,
+			chat_title  TEXT,
+			first_name  TEXT,
+			last_name   TEXT,
+			sent_at     INTEGER,
+			text        TEXT NOT NULL,
+			embedding   F32_BLOB(1536),
+			indexed_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+		);
+		CREATE INDEX IF NOT EXISTS idx_tv_sent_at ON telegram_vectors(sent_at);
+		CREATE INDEX IF NOT EXISTS idx_tv_from_id ON telegram_vectors(from_id);
+	`); err != nil {
+		cfg.Logger.Printf("⚠️ Failed to create telegram_vectors table: %v", err)
+	}
+
 	// Ensure prompt_usage_log stays in coaching.db
 	if _, err := legacyDB.Exec(`
 		CREATE TABLE IF NOT EXISTS prompt_usage_log (

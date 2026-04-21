@@ -19,6 +19,7 @@ import (
 	"cosmicbizwitch/internal/app/clickfunnels"
 	googleapp "cosmicbizwitch/internal/app/google"
 	slackapp "cosmicbizwitch/internal/app/slack"
+	"cosmicbizwitch/internal/app/storage"
 	telegramapp "cosmicbizwitch/internal/app/telegram"
 	"cosmicbizwitch/pkg/workflow"
 
@@ -26,7 +27,7 @@ import (
 )
 
 // RegisterDefaults wires up built-in demo activities and graphs into the engine.
-func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client, getGoogle func() *googleapp.Client, getSlack func() *slackapp.Client, getTelegram func() *telegramapp.Client) error {
+func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfunnels.Client, getGoogle func() *googleapp.Client, getSlack func() *slackapp.Client, getTelegram func() *telegramapp.Client, store ...*storage.Store) error {
 	registerActivities(eng, app, getCF, log.Default())
 	registerGoogleActivities(eng, getGoogle)
 	registerImageActivities(eng, app, getGoogle)
@@ -38,6 +39,10 @@ func RegisterDefaults(eng *workflow.Engine, app core.App, getCF func() *clickfun
 	registerFormatDate(eng)
 	registerRunWorkflow(eng)
 	registerAstrologyActivities(eng)
+	// Register telegram vector search/embed activities when store is provided.
+	if len(store) > 0 && store[0] != nil {
+		registerTelegramVectorActivities(eng, store[0], app)
+	}
 	return registerGraphs(eng, getCF)
 }
 

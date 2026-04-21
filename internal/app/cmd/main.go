@@ -117,7 +117,7 @@ func main() {
 			})
 
 			// Register default demo activities and graphs
-			if err := appworkflows.RegisterDefaults(eng, e.App, settingsMgr.CFClient, settingsMgr.GoogleClient, settingsMgr.SlackClient, settingsMgr.TelegramClient); err != nil {
+			if err := appworkflows.RegisterDefaults(eng, e.App, settingsMgr.CFClient, settingsMgr.GoogleClient, settingsMgr.SlackClient, settingsMgr.TelegramClient, store); err != nil {
 				return fmt.Errorf("register default workflows: %w", err)
 			}
 

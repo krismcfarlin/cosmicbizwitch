@@ -2,9 +2,13 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
+
+	openaiapp "cosmicbizwitch/internal/app/openai"
+	"cosmicbizwitch/internal/app/storage"
 
 	"github.com/pocketbase/dbx"
 )
@@ -445,4 +449,134 @@ func (s *Server) handleTelegramMessagesClear(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.respondJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleTelegramIndex bulk-indexes unindexed raw_telegram records into telegram_vectors.
+// POST /api/telegram/index
+//
+// Fetches all raw_telegram PB records with non-empty text, skips already-indexed ones,
+// calls OpenAI embeddings API in batches of 100, and upserts results into telegram_vectors.
+// Returns {"indexed": N, "skipped": N, "errors": N}.
+func (s *Server) handleTelegramIndex(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "store not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	apiKey := s.settings.Get("OPENAI_API_KEY")
+	if apiKey == "" {
+		s.respondError(w, http.StatusBadRequest, "OPENAI_API_KEY not configured", fmt.Errorf("add OPENAI_API_KEY in Settings"))
+		return
+	}
+
+	ctx := r.Context()
+	app := s.store.App()
+
+	// Fetch existing indexed IDs.
+	indexedIDs, err := s.store.GetTelegramVectorIDs(ctx)
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to get existing vector ids", err)
+		return
+	}
+
+	var totalIndexed, totalSkipped, totalErrors int
+
+	page := 1
+	const perPage = 200
+	for {
+		records, err := app.FindRecordsByFilter("raw_telegram", "text != ''", "-date", perPage, (page-1)*perPage)
+		if err != nil {
+			s.respondError(w, http.StatusInternalServerError, fmt.Sprintf("fetch raw_telegram page %d", page), err)
+			return
+		}
+		if len(records) == 0 {
+			break
+		}
+
+		type pending struct {
+			rec storage.TelegramVectorRecord
+		}
+		var batch []pending
+
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			texts := make([]string, len(batch))
+			for i, p := range batch {
+				texts[i] = p.rec.Text
+			}
+			vecs, embedErr := openaiapp.EmbedBatch(ctx, apiKey, texts)
+			if embedErr != nil {
+				s.logger.Printf("telegram index: embed batch of %d: %v", len(batch), embedErr)
+				totalErrors += len(batch)
+				batch = batch[:0]
+				return
+			}
+			for i, p := range batch {
+				p.rec.Embedding = vecs[i]
+				if upsertErr := s.store.UpsertTelegramVector(ctx, p.rec); upsertErr != nil {
+					s.logger.Printf("telegram index: upsert %s: %v", p.rec.ID, upsertErr)
+					totalErrors++
+				} else {
+					totalIndexed++
+				}
+			}
+			batch = batch[:0]
+		}
+
+		for _, rec := range records {
+			id := rec.Id
+			text := rec.GetString("text")
+			if text == "" || indexedIDs[id] {
+				totalSkipped++
+				continue
+			}
+			batch = append(batch, pending{rec: storage.TelegramVectorRecord{
+				ID:        id,
+				MessageID: int64(rec.GetInt("message_id")),
+				FromID:    int64(rec.GetInt("from_id")),
+				ChatID:    int64(rec.GetInt("chat_id")),
+				ChatTitle: rec.GetString("chat_title"),
+				FirstName: rec.GetString("message_first_name"),
+				LastName:  rec.GetString("message_last_name"),
+				SentAt:    int64(rec.GetInt("date")),
+				Text:      text,
+			}})
+			if len(batch) >= 100 {
+				flush()
+			}
+		}
+		flush()
+
+		if len(records) < perPage {
+			break
+		}
+		page++
+	}
+
+	s.logger.Printf("telegram index complete: indexed=%d skipped=%d errors=%d", totalIndexed, totalSkipped, totalErrors)
+	s.respondJSON(w, http.StatusOK, map[string]any{
+		"indexed": totalIndexed,
+		"skipped": totalSkipped,
+		"errors":  totalErrors,
+	})
+}
+
+// handleTelegramVectorStats returns statistics about the telegram_vectors table.
+// GET /api/telegram/vector-stats
+func (s *Server) handleTelegramVectorStats(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		http.Error(w, "store not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	count, err := s.store.CountTelegramVectors(r.Context())
+	if err != nil {
+		s.respondError(w, http.StatusInternalServerError, "failed to count telegram vectors", err)
+		return
+	}
+	s.respondJSON(w, http.StatusOK, map[string]any{
+		"total_indexed": count,
+	})
 }
