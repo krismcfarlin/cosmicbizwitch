@@ -50,6 +50,7 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 				ID        int64  `json:"id"`
 				Username  string `json:"username"`
 				FirstName string `json:"first_name"`
+				LastName  string `json:"last_name"`
 			} `json:"from"`
 			Chat struct {
 				ID    int64  `json:"id"`
@@ -217,11 +218,12 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 	msg := update.Message
 
 	var userID int64
-	var username, firstName string
+	var username, firstName, lastName string
 	if msg.From != nil {
 		userID = msg.From.ID
 		username = msg.From.Username
 		firstName = msg.From.FirstName
+		lastName = msg.From.LastName
 	}
 
 	text := msg.Text
@@ -233,6 +235,7 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 		"user_id":           userID,
 		"username":          username,
 		"first_name":        firstName,
+		"last_name":         lastName,
 		"text":              text,
 		"message_id":        msg.MessageID,
 		"message_thread_id": msg.MessageThreadID,
