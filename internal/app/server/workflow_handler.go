@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"cosmicbizwitch/pkg/workflow"
 )
@@ -333,6 +334,57 @@ func (s *Server) handleWorkflowGraphs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.respondJSON(w, http.StatusOK, map[string]any{"graphs": graphs, "names": names})
+}
+
+// handleWorkflowRunSync creates a workflow and polls until completion (cookie-auth).
+// POST /api/workflows/run-sync
+func (s *Server) handleWorkflowRunSync(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		GraphName string         `json:"graph_name"`
+		Context   map[string]any `json:"context"`
+		Name      string         `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if body.GraphName == "" {
+		http.Error(w, "graph_name is required", http.StatusBadRequest)
+		return
+	}
+	wf, err := s.engine.CreateWorkflow(r.Context(), body.Name, body.GraphName, body.Context, nil)
+	if err != nil {
+		s.respondError(w, http.StatusBadRequest, "create workflow failed", err)
+		return
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			s.respondError(w, http.StatusGatewayTimeout, "request cancelled", nil)
+			return
+		case <-ticker.C:
+			if time.Now().After(deadline) {
+				s.respondError(w, http.StatusGatewayTimeout, fmt.Sprintf("workflow timed out, id=%s", wf.ID), nil)
+				return
+			}
+			updated, pollErr := s.engine.Store().GetWorkflow(r.Context(), wf.ID)
+			if pollErr != nil {
+				s.respondError(w, http.StatusInternalServerError, "poll error", pollErr)
+				return
+			}
+			switch updated.Status {
+			case workflow.StatusCompleted:
+				s.respondJSON(w, http.StatusOK, map[string]any{"context": updated.Context, "id": wf.ID, "status": "completed"})
+				return
+			case workflow.StatusFailed:
+				s.respondJSON(w, http.StatusOK, map[string]any{"id": wf.ID, "status": "failed", "error": fmt.Sprintf("workflow %s failed", wf.ID)})
+				return
+			}
+		}
+	}
 }
 
 // handleWorkflowStream is an SSE endpoint for real-time workflow/activity updates.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
+	"time"
 
 	"cosmicbizwitch/pkg/workflow"
 
@@ -20,8 +22,7 @@ func newPBQueryFn(app core.App) workflow.ActivityFunc {
 			return nil, fmt.Errorf("pb_query: table_name is required")
 		}
 
-		limitF, _ := input["limit"].(float64)
-		limit := int(limitF)
+		limit := int(toFloat64OrZero(input["limit"]))
 		if limit <= 0 {
 			limit = 50
 		}
@@ -84,21 +85,59 @@ func newPBQueryFn(app core.App) workflow.ActivityFunc {
 			"count": len(records),
 		}
 
+		// Parse optional fields filter.
+		fieldsStr, _ := input["fields"].(string)
+		var allowedFields map[string]bool
+		if fieldsStr != "" {
+			allowedFields = make(map[string]bool)
+			for _, f := range strings.Split(fieldsStr, ",") {
+				f = strings.TrimSpace(f)
+				if f != "" {
+					allowedFields[f] = true
+				}
+			}
+		}
+
+		// Parse optional unix timestamp fields to format as human-readable.
+		unixDateFieldsStr, _ := input["unix_date_fields"].(string)
+		unixDateFields := map[string]bool{}
+		for _, f := range strings.Split(unixDateFieldsStr, ",") {
+			f = strings.TrimSpace(f)
+			if f != "" {
+				unixDateFields[f] = true
+			}
+		}
+
 		recList := make([]any, 0, len(records))
 		for _, rec := range records {
 			m := map[string]any{"id": rec.Id}
 			for _, col := range rec.Collection().Fields {
-				m[col.GetName()] = rec.Get(col.GetName())
+				name := col.GetName()
+				if allowedFields != nil && !allowedFields[name] {
+					continue
+				}
+				val := rec.Get(name)
+				if unixDateFields[name] {
+					if f, ok := toUnixSec(val); ok {
+						val = time.Unix(f, 0).UTC().Format("Jan 2, 2006 3:04 PM UTC")
+					}
+				}
+				m[name] = val
 			}
 			recList = append(recList, m)
 		}
 		out["records"] = recList
 
-		if len(records) > 0 {
+		suppressFlat, _ := input["suppress_flat"].(bool)
+		if !suppressFlat && len(records) > 0 {
 			rec := records[0]
 			out["id"] = rec.Id
 			for _, col := range rec.Collection().Fields {
-				out[col.GetName()] = rec.Get(col.GetName())
+				name := col.GetName()
+				if allowedFields != nil && !allowedFields[name] {
+					continue
+				}
+				out[name] = rec.Get(name)
 			}
 		}
 
@@ -323,4 +362,13 @@ func newPBUpsertFn(app core.App) workflow.ActivityFunc {
 		}
 		return out, nil
 	}
+}
+
+// toUnixSec converts a value to int64 Unix seconds if it looks like a Unix timestamp.
+func toUnixSec(v any) (int64, bool) {
+	f := toFloat64OrZero(v)
+	if f <= 0 || math.IsNaN(f) || math.IsInf(f, 0) {
+		return 0, false
+	}
+	return int64(f), true
 }

@@ -1741,6 +1741,238 @@ function CfUpsertMapperModal({ existingData, defaultSourceJson, onSave, onClose 
   )
 }
 
+// ── TelegramEmbedMapperModal (telegram_embed_message) ────────────────────────
+
+const TELEGRAM_EMBED_FIELDS: Array<{ name: string; description: string; required?: boolean }> = [
+  { name: 'id',         description: 'PocketBase record ID from raw_telegram', required: true },
+  { name: 'text',       description: 'Message text to embed', required: true },
+  { name: 'message_id', description: 'Telegram message_id' },
+  { name: 'from_id',    description: 'Telegram user ID of sender' },
+  { name: 'chat_id',    description: 'Telegram chat ID' },
+  { name: 'chat_title', description: 'Telegram chat title' },
+  { name: 'first_name', description: 'Sender first name' },
+  { name: 'last_name',  description: 'Sender last name' },
+  { name: 'sent_at',    description: 'Unix timestamp of message' },
+]
+
+function TelegramEmbedMapperModal({ existing, defaultSourceJson, onSave, onClose }: {
+  existing: Record<string, string>
+  defaultSourceJson: string
+  onSave: (fields: Record<string, string>) => void
+  onClose: () => void
+}) {
+  const dragRef = useRef<string>('')
+  const [sourceText, setSourceText] = useState(defaultSourceJson)
+  const [sourceParseError, setSourceParseError] = useState('')
+  const [sourcePaths, setSourcePaths] = useState<string[]>([])
+  const [sourceValues, setSourceValues] = useState<Record<string, unknown>>({})
+  const [sourceFilter, setSourceFilter] = useState('')
+  const [hiddenSourceKeys, setHiddenSourceKeys] = useState<Set<string>>(new Set())
+  const [rows, setRows] = useState<Array<{ field: string; value: string }>>(
+    TELEGRAM_EMBED_FIELDS.map(f => ({ field: f.name, value: existing[f.name] ?? '' }))
+  )
+  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (defaultSourceJson.trim() === '') return
+    try {
+      const parsed = JSON.parse(defaultSourceJson)
+      const out: string[] = []
+      collectLeafPaths(parsed, '', 0, out)
+      setSourcePaths(out.filter(p => p !== ''))
+      setSourceValues(buildValueMap(parsed))
+    } catch { /* ignore */ }
+  }, [defaultSourceJson])
+
+  const parseSource = () => {
+    setSourceParseError('')
+    setSourcePaths([])
+    let parsed: unknown
+    try { parsed = JSON.parse(sourceText) } catch { setSourceParseError('Invalid JSON.'); return }
+    const out: string[] = []
+    collectLeafPaths(parsed, '', 0, out)
+    setSourcePaths(out.filter(p => p !== ''))
+    setSourceValues(buildValueMap(parsed))
+  }
+
+  const handleDrop = (i: number) => {
+    const from = dragRef.current
+    if (!from) return
+    setRows(prev => prev.map((r, idx) => idx === i ? { ...r, value: `{{${from}}}` } : r))
+    setDragOverIdx(null)
+  }
+
+  const handleSave = () => {
+    const fields: Record<string, string> = {}
+    for (const r of rows) { if (r.value.trim() !== '') fields[r.field] = r.value }
+    onSave(fields)
+    onClose()
+  }
+
+  const visibleSourcePaths = sourcePaths.filter(p =>
+    !hiddenSourceKeys.has(p) && (!sourceFilter || p.toLowerCase().includes(sourceFilter.toLowerCase()))
+  )
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2100 }}>
+      <div style={{ background: 'white', borderRadius: '10px', width: '820px', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 24px 64px rgba(0,0,0,0.45)', overflow: 'hidden' }}>
+
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 20px', background: '#0369a1', color: 'white' }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: '15px' }}>Telegram Embed Mapper</div>
+            <div style={{ fontSize: '11px', color: '#7dd3fc', marginTop: '2px' }}>Map workflow context fields to telegram_embed_message inputs. Fields left blank are not sent.</div>
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '18px', color: '#7dd3fc', lineHeight: 1 }}>✕</button>
+        </div>
+
+        {/* Two-column body */}
+        <div style={{ flex: 1, overflow: 'auto', display: 'flex', gap: 0, minHeight: 0 }}>
+
+          {/* LEFT — Source Keys */}
+          <div style={{ flex: '0 0 260px', borderRight: '1px solid #e0e6ed', padding: '16px', display: 'flex', flexDirection: 'column', gap: '8px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Context Keys <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drag from here)</span>
+            </div>
+            <div style={{ fontSize: '10px', color: '#aaa', lineHeight: 1.5 }}>
+              Paste sample JSON from the workflow context, then click Parse Keys.
+            </div>
+            <textarea
+              value={sourceText}
+              onChange={e => setSourceText(e.target.value)}
+              rows={6}
+              placeholder={'{\n  "id": "abc123",\n  "text": "Hello"\n}'}
+              spellCheck={false}
+              style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'monospace', fontSize: '11px', padding: '6px 8px', border: '1px solid #ddd', borderRadius: '4px', resize: 'vertical' }}
+            />
+            {sourceParseError && <div style={{ color: '#e74c3c', fontSize: '11px' }}>{sourceParseError}</div>}
+            <button
+              onClick={parseSource}
+              style={{ padding: '5px', background: '#0369a1', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '11px' }}
+            >
+              Parse Keys
+            </button>
+
+            {sourcePaths.length > 0 && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#555', whiteSpace: 'nowrap' }}>SOURCE KEYS:</div>
+                  <input
+                    type="text"
+                    placeholder="filter..."
+                    value={sourceFilter}
+                    onChange={e => setSourceFilter(e.target.value)}
+                    style={{ flex: 1, fontSize: '10px', padding: '3px 6px', border: '1px solid #ddd', borderRadius: '4px', fontFamily: 'monospace', minWidth: 0 }}
+                  />
+                  {sourceFilter && (
+                    <button onClick={() => setSourceFilter('')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#aaa', fontSize: '12px', padding: 0, lineHeight: 1 }}>✕</button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
+                  {visibleSourcePaths.map(p => (
+                    <div
+                      key={p}
+                      draggable
+                      onDragStart={() => { dragRef.current = p }}
+                      onDragEnd={() => { dragRef.current = '' }}
+                      title={p in sourceValues ? fmtVal(sourceValues[p]) : undefined}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: '3px',
+                        background: '#e0f2fe', border: '1px solid #7dd3fc',
+                        borderRadius: '4px', padding: '3px 7px',
+                        fontFamily: 'monospace', fontSize: '10px',
+                        color: '#0369a1', cursor: 'grab', userSelect: 'none',
+                      }}
+                    >
+                      <span style={{ pointerEvents: 'none' }}>{p}</span>
+                      <span
+                        draggable={false}
+                        onMouseDown={e => { e.stopPropagation(); e.preventDefault() }}
+                        onClick={e => { e.stopPropagation(); setHiddenSourceKeys(prev => new Set([...prev, p])) }}
+                        style={{ cursor: 'pointer', color: '#7dd3fc', fontSize: '9px', lineHeight: 1, paddingLeft: '2px', pointerEvents: 'all' }}
+                        title="Hide this key"
+                      >✕</span>
+                    </div>
+                  ))}
+                </div>
+                {hiddenSourceKeys.size > 0 && (
+                  <button onClick={() => setHiddenSourceKeys(new Set())} style={{ alignSelf: 'flex-start', fontSize: '10px', color: '#6b7280', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 0', textDecoration: 'underline' }}>
+                    show {hiddenSourceKeys.size} hidden
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* RIGHT — Field rows */}
+          <div style={{ flex: 1, padding: '16px', display: 'flex', flexDirection: 'column', gap: '6px', overflow: 'auto' }}>
+            <div style={{ fontSize: '11px', fontWeight: 700, color: '#555', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
+              Activity Fields <span style={{ fontWeight: 400, color: '#aaa', textTransform: 'none' }}>(drop value from left · or type literal)</span>
+            </div>
+
+            {rows.map((row, i) => {
+              const meta = TELEGRAM_EMBED_FIELDS[i]
+              return (
+                <div key={row.field} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  {/* Fixed field name */}
+                  <div style={{
+                    flex: '0 0 100px', fontFamily: 'monospace', fontSize: '11px', padding: '5px 8px',
+                    background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: '4px',
+                    color: '#0369a1', fontWeight: 700,
+                  }}>
+                    {row.field}{meta?.required && <span style={{ color: '#e74c3c' }}>*</span>}
+                  </div>
+                  {/* Description */}
+                  <div style={{ flex: '0 0 180px', fontSize: '10px', color: '#94a3b8', lineHeight: 1.3 }}>{meta?.description}</div>
+                  {/* Drop zone for value */}
+                  <div
+                    onDragOver={e => { e.preventDefault(); setDragOverIdx(i) }}
+                    onDragLeave={() => setDragOverIdx(null)}
+                    onDrop={() => handleDrop(i)}
+                    style={{
+                      flex: 1, minHeight: '30px', display: 'flex', alignItems: 'center',
+                      background: dragOverIdx === i ? '#e0f2fe' : '#f8fafc',
+                      border: `1px dashed ${dragOverIdx === i ? '#0369a1' : '#cbd5e1'}`,
+                      borderRadius: '4px', overflow: 'hidden', transition: 'background 0.1s, border-color 0.1s',
+                    }}
+                  >
+                    <input
+                      value={row.value}
+                      onChange={e => setRows(prev => prev.map((r, idx) => idx === i ? { ...r, value: e.target.value } : r))}
+                      placeholder="drop or type value"
+                      title={resolveTitle(row.value, sourceValues)}
+                      style={{ flex: 1, fontFamily: 'monospace', fontSize: '11px', padding: '4px 8px', border: 'none', background: 'transparent', outline: 'none', color: row.value.startsWith('{{') ? '#0369a1' : '#333' }}
+                    />
+                    {row.value && (
+                      <button
+                        onClick={() => setRows(prev => prev.map((r, idx) => idx === i ? { ...r, value: '' } : r))}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#cbd5e1', fontSize: '12px', padding: '0 8px', lineHeight: 1 }}
+                      >✕</button>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '10px', padding: '12px 20px', borderTop: '1px solid #e0e6ed', background: '#f8f9fa' }}>
+          <button onClick={onClose} style={{ padding: '8px 16px', background: '#f0f0f0', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 500, fontSize: '13px' }}>
+            Cancel
+          </button>
+          <button
+            onClick={handleSave}
+            style={{ padding: '8px 20px', background: '#0369a1', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}
+          >
+            Save Fields
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── CfContactIdMapperModal (cf_get_contact / cf_upsert / cf_add_tag / cf_remove_tag) ──
 
 function CfContactIdMapperModal({ existingValue, defaultSourceJson, onSave, onClose }: {
@@ -4094,6 +4326,7 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
   const [showCfUpsertMapper, setShowCfUpsertMapper] = useState(false)
   const [showCfTagPicker, setShowCfTagPicker] = useState(false)
   const [showCfContactIdMapper, setShowCfContactIdMapper] = useState(false)
+  const [showTelegramEmbedMapper, setShowTelegramEmbedMapper] = useState(false)
 
   if (node.activityName === 'END') {
     return (
@@ -4124,6 +4357,7 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
   const isNotes = node.activityName === 'notes'
   const isTelegramButton = node.activityName === 'telegram_send_button'
   const isCfUpsert = node.activityName === 'cf_upsert'
+  const isTelegramEmbed = node.activityName === 'telegram_embed_message'
   const isCfTagNode = node.activityName === 'cf_add_tag' || node.activityName === 'cf_remove_tag'
   const hasCfContactId = ['cf_get_contact', 'cf_upsert', 'cf_add_tag', 'cf_remove_tag'].includes(node.activityName ?? '')
 
@@ -4487,7 +4721,7 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
         </>
       )}
 
-      {!isPython && !isMapper && !isLlm && !isPbQuery && !isNotes && inputFields.length > 0 && (
+      {!isPython && !isMapper && !isLlm && !isPbQuery && !isNotes && !isTelegramEmbed && inputFields.length > 0 && (
         <>
           <div style={{ marginTop: '14px', marginBottom: '6px', fontSize: '11px', fontWeight: 700, color: '#444', borderTop: '1px solid #e0e6ed', paddingTop: '10px' }}>
             Input Fields
@@ -4703,6 +4937,33 @@ function NodeEditor({ node, isStart, activities, onSetStart, onChange, onDelete,
                 setShowCfUpsertMapper(false)
               }}
               onClose={() => setShowCfUpsertMapper(false)}
+            />
+          )}
+        </>
+      )}
+
+      {isTelegramEmbed && (
+        <>
+          <button
+            onClick={() => setShowTelegramEmbedMapper(true)}
+            style={{
+              display: 'block', width: '100%', marginTop: '10px',
+              padding: '6px 10px', background: '#0369a1', color: 'white',
+              border: 'none', borderRadius: '4px', cursor: 'pointer',
+              fontWeight: 600, fontSize: '11px', textAlign: 'left',
+            }}
+          >
+            Open Field Mapper
+          </button>
+          {showTelegramEmbedMapper && (
+            <TelegramEmbedMapperModal
+              existing={node.staticInput ?? {}}
+              defaultSourceJson={debugContext}
+              onSave={fields => {
+                set({ staticInput: { ...(node.staticInput ?? {}), ...fields } })
+                setShowTelegramEmbedMapper(false)
+              }}
+              onClose={() => setShowTelegramEmbedMapper(false)}
             />
           )}
         </>

@@ -185,6 +185,7 @@ func registerActivities(eng *workflow.Engine, app core.App, getCF func() *clickf
 				{Name: "sort_dir", Type: "string", Description: "\"asc\" or \"desc\""},
 				{Name: "limit", Type: "number", Description: "Max records to return (default 50)"},
 				{Name: "filter", Type: "string", Description: "Raw PocketBase filter string (backward compat)"},
+				{Name: "fields", Type: "string", Description: "Comma-separated field names to include in each record. Omit for all fields."},
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "<result_key>.found", Type: "bool", Description: "True if any records matched"},

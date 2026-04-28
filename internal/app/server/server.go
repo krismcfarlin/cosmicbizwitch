@@ -161,6 +161,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workflows/{id}/activities", s.requireAuth(s.handleWorkflowActivities))
 	mux.HandleFunc("GET /api/workflows", s.requireAuth(s.handleWorkflowList))
 	mux.HandleFunc("POST /api/workflows", s.requireAuth(s.handleWorkflowCreate))
+	mux.HandleFunc("POST /api/workflows/run-sync", s.requireAuth(s.handleWorkflowRunSync))
 	mux.HandleFunc("DELETE /api/workflows/{id}", s.requireAuth(s.handleWorkflowDelete))
 	mux.HandleFunc("POST /api/workflows/{id}/cancel", s.requireAuth(s.handleWorkflowCancel))
 	mux.HandleFunc("POST /api/workflows/{id}/restart", s.requireAuth(s.handleWorkflowRestart))
@@ -212,6 +213,10 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	// Settings SPA page (auth required)
 	mux.HandleFunc("GET /settings", s.requireAuth(s.handleLogsPage))
 	mux.HandleFunc("GET /settings/{path...}", s.requireAuth(s.handleLogsPage))
+
+	// Telegram SPA pages (auth required)
+	mux.HandleFunc("GET /telegram", s.requireAuth(s.handleLogsPage))
+	mux.HandleFunc("GET /telegram/{path...}", s.requireAuth(s.handleLogsPage))
 
 	// Home (catch-all, auth required)
 	mux.HandleFunc("/", s.handleHome)
@@ -306,7 +311,7 @@ func (s *Server) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle run_workflow tool.
+	// Handle run_workflow tool — synchronous: poll until completed/failed or 60s timeout.
 	if s.engine != nil && req.Name == "run_workflow" {
 		graphName, _ := req.Arguments["graph_name"].(string)
 		if graphName == "" {
@@ -316,9 +321,9 @@ func (s *Server) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		ctx, _ := req.Arguments["context"].(map[string]interface{})
+		wfCtx, _ := req.Arguments["context"].(map[string]interface{})
 		name, _ := req.Arguments["name"].(string)
-		wf, err := s.engine.CreateWorkflow(r.Context(), name, graphName, ctx, nil)
+		wf, err := s.engine.CreateWorkflow(r.Context(), name, graphName, wfCtx, nil)
 		if err != nil {
 			s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
 				Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("Error: %v", err)}},
@@ -326,10 +331,52 @@ func (s *Server) handleMCPCallTool(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
-			Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("Workflow started: id=%s status=%s graph=%s", wf.ID, wf.Status, wf.GraphName)}},
-		})
-		return
+
+		// Poll until terminal state or 60s timeout.
+		deadline := time.Now().Add(60 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		pollCtx := r.Context()
+		for {
+			select {
+			case <-pollCtx.Done():
+				s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+					Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("workflow timed out after 60s, id=%s", wf.ID)}},
+					IsError: true,
+				})
+				return
+			case <-ticker.C:
+				if time.Now().After(deadline) {
+					s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+						Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("workflow timed out after 60s, id=%s", wf.ID)}},
+						IsError: true,
+					})
+					return
+				}
+				updated, pollErr := s.engine.Store().GetWorkflow(pollCtx, wf.ID)
+				if pollErr != nil {
+					s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+						Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("Error polling workflow %s: %v", wf.ID, pollErr)}},
+						IsError: true,
+					})
+					return
+				}
+				switch updated.Status {
+				case workflow.StatusCompleted:
+					outJSON, _ := json.Marshal(updated.Context)
+					s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+						Content: []mcp.ContentBlock{{Type: "text", Text: string(outJSON)}},
+					})
+					return
+				case workflow.StatusFailed:
+					s.respondJSON(w, http.StatusOK, mcp.ToolCallResponse{
+						Content: []mcp.ContentBlock{{Type: "text", Text: fmt.Sprintf("workflow %s (%s) failed", wf.ID, graphName)}},
+						IsError: true,
+					})
+					return
+				}
+			}
+		}
 	}
 
 	// Route to workflow activity if registered.

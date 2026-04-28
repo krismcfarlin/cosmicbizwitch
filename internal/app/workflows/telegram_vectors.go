@@ -71,23 +71,22 @@ func registerTelegramSearch(eng *workflow.Engine, store *storage.Store, app core
 			items := make([]any, 0, len(results))
 			for _, r := range results {
 				items = append(items, map[string]any{
-					"id":         r.ID,
-					"message_id": r.MessageID,
-					"from_id":    r.FromID,
-					"chat_id":    r.ChatID,
-					"chat_title": r.ChatTitle,
+					"text":       r.Text,
+					"sent_at":    r.SentAt,
 					"first_name": r.FirstName,
 					"last_name":  r.LastName,
-					"sent_at":    r.SentAt,
-					"text":       r.Text,
 					"score":      r.Score,
 				})
 			}
 
-			return map[string]any{
+			out := map[string]any{
 				"results": items,
 				"count":   len(items),
-			}, nil
+			}
+			if rk, _ := input["result_key"].(string); rk != "" {
+				return map[string]any{rk: out}, nil
+			}
+			return out, nil
 		},
 		workflow.ActivityMeta{
 			Category:    "Telegram",
@@ -99,6 +98,7 @@ func registerTelegramSearch(eng *workflow.Engine, store *storage.Store, app core
 				{Name: "start_date", Type: "string", Description: "Filter messages on or after this date. ISO date (2024-01-15) or unix timestamp string."},
 				{Name: "end_date", Type: "string", Description: "Filter messages on or before this date. ISO date or unix timestamp string."},
 				{Name: "limit", Type: "number", Description: "Maximum results to return (default 10, max 100)"},
+				{Name: "result_key", Type: "string", Description: "Context key to store results under (e.g. \"similar_messages\" → {{similar_messages.results}})"},
 			},
 			OutputFields: []workflow.FieldMeta{
 				{Name: "results", Type: "array", Description: "Array of matching messages. Each item has: id, message_id, from_id, chat_id, chat_title, first_name, last_name, sent_at, text, score."},
